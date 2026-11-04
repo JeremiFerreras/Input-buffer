@@ -303,7 +303,32 @@ static void testQueue() {
         std::printf("  12-tap spam held 8 ticks @170fps+CBF: old fired %d presses, new %d\n", countPress(o), countPress(n));
     }
 
-    // 6. Queue idles again once drained; next input is decided normally.
+    // 7. The fixed capacity rejects overflow without corrupting queued order.
+    {
+        InputQueue q;
+        q.start(true, 0.0, 0.0);
+        bool expected = true;
+        for (size_t i = 1; i < InputQueue::MAX_EVENTS; i++) {
+            expected = !expected;
+            CHECK(q.push(expected, static_cast<double>(i) * 0.1, 0.01),
+                  "event %zu rejected before capacity", i);
+        }
+        int const before = q.dropped();
+        CHECK(!q.push(!expected, 4.0, 0.01), "overflow event unexpectedly accepted");
+        CHECK(q.dropped() == before + 1, "dropped count=%d expected=%d", q.dropped(), before + 1);
+        CHECK(q.size() == InputQueue::MAX_EVENTS, "size=%zu expected=%zu", q.size(), InputQueue::MAX_EVENTS);
+
+        size_t fired = 0;
+        expected = true;
+        while (auto event = q.poll(1e9)) {
+            CHECK(*event == expected, "event %zu out of order", fired);
+            expected = !expected;
+            fired++;
+        }
+        CHECK(fired == InputQueue::MAX_EVENTS, "fired=%zu expected=%zu", fired, InputQueue::MAX_EVENTS);
+    }
+
+    // 8. Queue idles again once drained; next input is decided normally.
     {
         InputQueue q;
         q.start(true, 0.0, 1.0);
@@ -640,6 +665,16 @@ static void testClearance() {
     for (int i = 0; i <= 12; i++) m.sample(100 + 8.0 * 0.25 * i, 50, 1.0 + 0.25 * i, 3.0, 200.f);
     CHECK(m.moving(4.0, 2.0, 0.05f), "steady mover not trusted (ok=%d)", m.ok);
     CHECK(std::fabs(m.vx - 8.f) < 1e-3f && std::fabs(m.vy) < 1e-3f, "v=%.3f,%.3f", m.vx, m.vy);
+
+    // The game-facing prediction requires two consecutive validations. A
+    // first plausible velocity alone must not move a simulated hitbox.
+    MoverTrack cautious;
+    cautious.sample(0, 0, 0.0, 3.0, 200.f);
+    cautious.sample(4, 0, 0.5, 3.0, 200.f); // establish speed; no validation yet
+    cautious.sample(8, 0, 1.0, 3.0, 200.f); // first successful prediction
+    CHECK(!cautious.moving(1.0, 2.0, 0.05f, 2), "mover trusted after only one validation (ok=%d)", cautious.ok);
+    cautious.sample(12, 0, 1.5, 3.0, 200.f); // second successful prediction
+    CHECK(cautious.moving(1.5, 2.0, 0.05f, 2), "mover not trusted after two validations (ok=%d)", cautious.ok);
     float dx, dy;
     m.offsetAt(m.t + 0.5, dx, dy);
     CHECK(std::fabs(dx - 4.f) < 0.05f && std::fabs(dy) < 1e-3f, "offset %.3f,%.3f", dx, dy);

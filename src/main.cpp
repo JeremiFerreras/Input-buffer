@@ -1,5 +1,5 @@
 // ============================================================================
-//  Input Buffer  v1.24.1                    (Geode mod for Geometry Dash)
+//  Geode Predictive Input Buffer  v4.7.0 (Geometry Dash / Geode)
 //
 //  WHAT THIS MOD IS
 //  ----------------
@@ -1188,7 +1188,7 @@ constexpr int    SCAN_BEAM               = 64;    // versions kept alive at once
 constexpr float  SCAN_SAFE_CLR           = 12.f;  // closer than this to a hazard costs the route (guide keeps a margin)
 constexpr float  SCAN_CLOSE_COST         = 0.25f; // cost per step spent right at a hazard (an input costs 1)
 constexpr float  SCAN_Y_BUCKET           = 3.f;   // versions closer than this in height count as the same
-constexpr int    SCAN_SLICE_US           = 2000;  // lightweight CPU slice per frame while paused (2 ms)
+constexpr int    SCAN_SLICE_US           = 250;   // tiny CPU slice per rendered frame while playing (~0.25 ms)
 constexpr int    SCAN_BEAM_WIDE          = 256;   // "trying harder" after backing up: 4x the versions ...
 constexpr float  SCAN_Y_BUCKET_WIDE      = 1.5f;  // ... finer heights, and a switch every tick
 constexpr float  SCAN_REWIND_EVERY       = 40.f;  // keep a copy of the versions every 40 px ...
@@ -1196,6 +1196,7 @@ constexpr int    SCAN_REWIND_KEEP        = 12;    // ... the last 12 of them
 constexpr float  SCAN_REWIND_PX          = 120.f; // stuck: back up about 4 blocks
 constexpr float  SCAN_WIDE_PAST          = 90.f;  // and try harder until 3 blocks past the stuck spot
 constexpr float  SCAN_SKIP_PAST          = 30.f;  // last resort: go through the spot, 1 block past it
+constexpr float  SCAN_MOVER_WIDE_PAST    = 60.f;  // refine the beam for 2 blocks after a confirmed moving hazard
 constexpr int    REAL_DECIDE_TICKS       = 2;     // real-game scan: an input decision every 2 ticks
 constexpr int    REAL_CP_EVERY           = 8;     // a checkpoint every 8 decisions (16 ticks)
 constexpr int    REAL_CP_KEEP            = 48;    // keep the last 48 (~3 s to back up through)
@@ -1215,7 +1216,8 @@ constexpr float  PORTAL_HOLD_PX          = 40.f;
 constexpr int    PORTAL_HOLD_TICKS_BASE  = 4;  // only presses this close (in ticks) to the portal are held
 constexpr int    ORB_CAL_STEPS           = 10; // orb press check: compare 10 ticks after the press
 constexpr float  MINI_SIZE               = 0.6f; // GD's mini scale
-constexpr bool   MOVERS_ON               = false; // moving-object tracking (1.26.0: off, see sampleMovers)
+constexpr bool   MOVERS_ON               = true;  // predict only visible, axis-aligned movers after two validated motion checks
+constexpr int    MOVER_MIN_CONFIRMATIONS = 2;     // require two consecutive successful position predictions
 constexpr float  PLAN_DRIFT_PX           = 0.5f;  // held click: off the planned path by more than this = re-check (1.26.1)
 constexpr int    ORB_AIM_MAX_TESTS       = 64; // orb aim: tests per click at most (the time limit below decides first)
 constexpr int    ORB_AIM_FINE_SPAN       = 24; // overlap this short: every tick; longer: every 3rd, then around good ones
@@ -1369,8 +1371,8 @@ struct Config {
             c.extremeWindow = 0;
             c.extremeHoldCap = 0;
         }
-        // This fork intentionally has no in-game Input Buffer panel, path overlay,
-        // badge, or orb-helper visuals. The external console is the only UI.
+        // This console-first profile intentionally keeps the gameplay view clear.
+        // Prediction and scanning run on hidden players; status is shown externally.
         c.hudScale   = 1.0f;
         c.hud        = false;
         c.hudVerbose = false;
@@ -1382,7 +1384,7 @@ struct Config {
         c.realScan   = false;
         c.learnSpots = mod->getSavedValue<bool>("learn-spots", true);
         c.showBadge  = false;
-        c.accuracy   = false;
+        c.accuracy   = true;
         return c;
     }
 };
@@ -2037,6 +2039,7 @@ const ccColor3B COL_DIM    = {120, 110, 160};
 ccColor3B logTagColor(std::string const& tag) {
     if (tag == "DEATH")  return {255, 95, 95};
     if (tag == "BUFFER") return {110, 255, 130};
+    if (tag == "PERFECT") return {110, 255, 130};
     if (tag == "FIRED")  return {80, 220, 170};
     if (tag == "QUEUED") return {110, 200, 255};
     if (tag == "RAW")    return {255, 170, 80};
@@ -2090,7 +2093,7 @@ struct LogConsole {
             if (HMENU m = GetSystemMenu(w, FALSE)) DeleteMenu(m, SC_CLOSE, MF_BYCOMMAND);
         }
         s_on = true;
-        write("[InputBuffer] v4.6 LOADED (Wave Spikes/Saws Trajectory Fix)", {255, 255, 255});
+        write("[InputBuffer] v4.7.0 LOADED (Predictive Input Assistance)", {255, 255, 255});
         int const stage = stageFromSetting(Mod::get()->getSettingValue<std::string>("stage"));
         if (stage == 0) {
             write("[InputBuffer] Starting Mode: OFF (100% Raw Input)", {255, 255, 255});
@@ -2169,6 +2172,8 @@ class TrajectoryBufferSim {
     double m_simNow   = 0.0;    // game time the test starts at
     float  m_simDtCur = BASE_DT;// step length of the current test
     std::unordered_map<GameObject*, ibcore::MoverTrack> m_movers; // hazards seen near you (never dereferenced from here)
+    double m_lastMoverSample = -1.0; // sample at most twice per 60-fps frame, not every CBF sub-step
+    double m_lastMoverPrune  = -1.0;
     long long m_moverTests  = 0; // tests that used a moving hazard
     long long m_moverDeaths = 0; // ... and died to one
     long long m_cleanWaits  = 0; // live: waited for a cleaner moment
@@ -3283,6 +3288,7 @@ public:
     ModeInfo    m_scanMode;
     float       m_scanDt = BASE_DT, m_scanS = 1.f;
     long long   m_scanSteps = 0;
+    long long   m_scanMoverTests = 0; // confirmed moving-hazard checks used by the beam scanner
     int         m_scanInputs = 0;
     int         m_scanLastMode = -1;           // the beam's gamemode last step (portal re-sync)
     // Never stop (2.1): back up and try harder, then your own run, then the
@@ -3314,12 +3320,11 @@ public:
     void startScan(PlayLayer* pl) {
         if (scanning()) return;
         m_scanMsg.clear();
-        if (!pl || !pl->m_player1 || pl->m_player1->m_isDead) { m_scanMsg = "open a level and pause it first"; return; }
-        if (!pl->m_isPaused) { m_scanMsg = "pause the level first (it scans while paused)"; return; }
+        if (!pl || !pl->m_player1 || pl->m_player1->m_isDead) { m_scanMsg = "waiting for a live player"; return; }
         if (m_attemptPending) {
-            // Paused before the first tick: a start position hasn't placed the
-            // player yet, so the scan would run from the level's default spawn.
-            m_scanMsg = "let the attempt start first (unpause for a moment, then pause and scan)";
+            // Wait for Geometry Dash's first real physics step so the copied
+            // player state contains the actual attempt spawn, not the level default.
+            m_scanMsg = "waiting for the first physics step";
             return;
         }
         if (pl->m_gameState.m_isDualMode || pl->m_player1->m_isPlatformer) { m_scanMsg = "can't scan dual or platformer parts"; return; }
@@ -3333,6 +3338,7 @@ public:
         m_scanMode.add(pl->m_player1);
         m_scanSavedOrbs = m_realUsedOrbs;
         m_scanSteps = 0;
+        m_scanMoverTests = 0;
         m_consoleScanPct = -10;
         m_scanInputs = 0;
         m_scanJumps = 0;
@@ -3351,7 +3357,10 @@ public:
         m_scanPortalTraces = 0;
         m_scanModeSwitches = 0;
         BeamNode root;
-        root.fromReal = true;
+        // Scan from an immutable snapshot of the first live physics step. The
+        // real player keeps playing; only the hidden simulation uses this copy.
+        root.fromReal = false;
+        root.snap = snapFrom(pl->m_player1);
         root.mode = scanModeIndex(pl->m_player1);
         root.modeCode = modeCode(pl->m_player1);
         root.held = m_gameHolding;
@@ -3368,18 +3377,15 @@ public:
                           pl->m_player1->getPositionY(), m_scanMode.name(), pl->m_player1->m_playerSpeed, pl->m_levelLength));
     }
 
-    // Automatically start a level scan on the first compatible pause. The scan
-    // engine mutates a hidden simulation and requires the actual level to remain
-    // paused; it is deliberately not run against a moving live level.
-    void autoScanOnPause(PlayLayer* pl) {
+    // Start automatically as soon as the first real physics step has placed
+    // the player. The scan advances on the overlay runner in small slices while
+    // the level continues; it never pauses or drives the real player.
+    void autoScanOnEnter(PlayLayer* pl) {
         if (!Mod::get()->getSettingValue<bool>("auto-scan")) return;
         if (scanning() || m_autoScanComplete) return;
-        // If the player unpaused before the scan finished, a later pause starts
-        // another segment from the current real-player position. routeMerge()
-        // preserves the useful part of the earlier partial scan.
         startScan(pl);
         if (scanning()) {
-            LogConsole::write("[InputBuffer] Auto scan started (small CPU slices while paused).", {255, 255, 255});
+            LogConsole::write("[InputBuffer] Auto scan started on level entry (small slices while playing).", {255, 255, 255});
         } else if (!m_scanMsg.empty()) {
             LogConsole::write(fmt::format("[InputBuffer] Auto scan skipped: {}", m_scanMsg), {255, 255, 255});
         }
@@ -3471,6 +3477,7 @@ public:
             if (m_scanJumps > 0) add(fmt::format("used your run {}x", m_scanJumps));
             if (m_scanReal > 0) add(fmt::format("used the real game {}x", m_scanReal));
             if (m_scanSkips > 0) add(fmt::format("went through {} spot{} it couldn't solve", m_scanSkips, m_scanSkips == 1 ? "" : "s"));
+            if (m_scanMoverTests > 0) add(fmt::format("used confirmed moving-hazard prediction in {} checks; scan resolution increased nearby", m_scanMoverTests));
             if (!extra.empty()) msg += " (" + extra + ")";
         }
         m_realUsedOrbs = m_scanSavedOrbs;
@@ -3492,11 +3499,6 @@ public:
         PlayLayer* pl = PlayLayer::get();
         if (!pl || !m_simPlayer1.data() || !pl->m_player1) {
             m_scanState = ScanState::Off; m_beam.clear(); m_beamHist.clear(); m_scanMsg = "stopped (left the level)"; return;
-        }
-        if (!pl->m_isPaused) {
-            if (m_realScan) realScanAbort(pl, "unpaused"); // the level goes back to where you paused first
-            finishScan(pl, fmt::format("stopped at {:.0f}% - stay paused while it scans", pctAt(pl, m_scanX)), &m_beam);
-            return;
         }
         int const scanPct = static_cast<int>(std::floor(std::clamp(pctAt(pl, m_scanX), 0.f, 100.f) / 10.f)) * 10;
         if (scanPct >= m_consoleScanPct + 10 && scanPct < 100) {
@@ -3545,6 +3547,8 @@ public:
                     m_realUsedOrbs = m_scanSavedOrbs;
                     for (auto* o : n.orbs) m_realUsedOrbs.push_back(o);
                     m_simSnap = n.fromReal ? nullptr : &n.snap;
+                    bool const moversBeforeScan = m_simMovers;
+                    m_simMovers = MOVERS_ON;
                     m_scanSim = true;
                     int const delay = toggle ? 0 : k;
                     FollowUp tap;
@@ -3552,6 +3556,7 @@ public:
                     SimResult const r = simulate(pl, pl->m_player1, nullptr, false, holdMode ? held : true, delay,
                                                  k - delay, true, m_scanDt, m_scanS, tap);
                     m_scanSim = false;
+                    m_simMovers = moversBeforeScan;
                     m_simSnap = nullptr;
                     m_gameHolding = g;
                     m_phase = ph;
@@ -3776,6 +3781,8 @@ public:
             m_realUsedOrbs = m_scanSavedOrbs;
             for (auto* o : cur.orbs) m_realUsedOrbs.push_back(o);
             m_simSnap = cur.fromReal ? nullptr : &cur.snap;
+            bool const moversBeforeScan = m_simMovers;
+            m_simMovers = MOVERS_ON;
             m_scanSim = true;
             m_scanNoclip = true;
             int const k = std::max(1, scaleTicks(4, m_scanS));
@@ -3783,6 +3790,7 @@ public:
                                          m_scanDt, m_scanS);
             m_scanNoclip = false;
             m_scanSim = false;
+            m_simMovers = moversBeforeScan;
             m_simSnap = nullptr;
             m_gameHolding = g;
             m_phase = ph;
@@ -4530,7 +4538,7 @@ private:
                 }
             }
         }
-        if ((m_tick & 7) != 0 || m_queue.pending() || p->m_isDead || m_simulating || tickPhase() > 0.f) return;
+        if ((m_tick & 31) != 0 || m_queue.pending() || p->m_isDead || m_simulating || tickPhase() > 0.f) return;
         PlayerObject* p2 = (pl->m_gameState.m_isDualMode && pl->m_player2) ? pl->m_player2 : nullptr;
         bool const simP2 = p2 && !(pl->m_level && pl->m_level->m_twoPlayerMode);
         bool const rec = m_recordPath;
@@ -5074,9 +5082,9 @@ private:
                 }
                 if (n.stream && !c.hudVerbose) return false; // spam: one line per stream is enough
                 tag = "BUFFER";
-                text = fmt::format("SAVED +{} TICKS ({:.2f} frames @ 60fps) {}! (Frame: @ -> Delayed (@)) [Limit: {}]",
+                text = fmt::format("SAVED +{} TICKS ({:.2f} frames @ 60fps) {}{} | Frame: @ -> Delayed (@) | {} delay candidates tested in {} us | Limit: {} ticks",
                                    n.delay, static_cast<float>(n.delay) * dt,
-                                   n.push ? "PRESS" : "RELEASE", n.windowTicks);
+                                   n.push ? "PRESS" : "RELEASE", mode, n.evals, n.us, n.windowTicks);
                 return true;
             case Decision::Queued:
                 return false; // inputs behind a held one: no line (2.1)
@@ -5107,9 +5115,14 @@ private:
                 tag = "RAW";
                 text = fmt::format("{}, out of CPU time", act);
                 return true;
-            case Decision::PassEscapable:
             case Decision::PassSafe:
-                return false; // on time, nothing changed: no line (2.1)
+                tag = "PERFECT";
+                text = fmt::format("{} already safe; passed unchanged{} | Frame: @ | Delay: 0 ticks | Limit: {} ticks",
+                                   act, mode, n.windowTicks);
+                color = COL_GREEN;
+                return true;
+            case Decision::PassEscapable:
+                return false; // the player can still steer out of it; no delay is needed
             case Decision::PassRelease:
                 return false; // releases that do nothing: never worth a line (1.25.2)
             case Decision::PassModeOff:
@@ -5196,13 +5209,25 @@ private:
             ClickNote tagged = n;
             tagged.modeName = modeName;
             if (panelLine(tagged, c, dt, tag, text, color)) {
-                constexpr char const* marker = "Frame: @ -> Delayed (@)";
+                constexpr char const* savedMarker = "Frame: @ -> Delayed (@)";
+                constexpr char const* perfectMarker = "Frame: @";
                 if (n.d == Decision::Buffered) {
-                    size_t const at = text.find(marker);
+                    size_t const at = text.find(savedMarker);
                     if (at != std::string::npos) {
-                        text.replace(at, std::char_traits<char>::length(marker),
-                                     fmt::format("Frame: {} -> Delayed ({})", m_tick, m_tick + n.delay));
+                        // m_gameTime is in 60-fps frame units. Align the target to
+                        // the same physics-tick grid used by the actual queue; m_tick
+                        // is only an update-call counter and is not a frame number.
+                        double const frameNow = m_gameTime;
+                        double const tickStart = m_gameTime - static_cast<double>(tickPhase()) * dt;
+                        double const delayedFrame = tickStart + static_cast<double>(n.delay) * dt;
+                        text.replace(at, std::char_traits<char>::length(savedMarker),
+                                     fmt::format("Frame: {:.2f} -> Delayed ({:.2f})", frameNow, delayedFrame));
                     }
+                } else if (n.d == Decision::PassSafe) {
+                    size_t const at = text.find(perfectMarker);
+                    if (at != std::string::npos)
+                        text.replace(at, std::char_traits<char>::length(perfectMarker),
+                                     fmt::format("Frame: {:.2f}", m_gameTime));
                 }
                 pushTagged(std::move(tag), std::move(text), color);
             }
@@ -5464,6 +5489,24 @@ public:
     }
 
     void quit() {
+        // Give the console a useful, bounded report even when verbose tracing
+        // and CSV export are disabled. These totals only run once on level exit.
+        auto const& pred = m_tracker.stats();
+        int oneN = 0, oneExact = 0;
+        float oneWorst = 0.f;
+        for (auto const& [mode, o] : m_oneStep) {
+            oneN += o.n;
+            oneExact += o.exact;
+            oneWorst = std::max(oneWorst, o.worst);
+        }
+        if (LogConsole::on() && (pred.checks > 0 || oneN > 0)) {
+            LogConsole::write(
+                fmt::format("[InputBuffer] Prediction diagnostics: click checkpoints {}/{} within {:.1f}px, "
+                            "average error {:.2f}px, died first {}, skipped {}; one-tick exact {}/{} (worst {:.2f}px)",
+                            pred.hits, pred.checks, ACCURACY_TOL_PX, pred.avgErr(), pred.deaths, pred.dropped,
+                            oneExact, oneN, oneWorst),
+                {255, 255, 255});
+        }
         if ((m_logDebug || m_logCsv) && m_stats.clicks > 0) {
             std::string text = summary();
             log::info("[InputBuffer] session: {}", text);
@@ -5772,6 +5815,7 @@ public:
         m_streamShift = 0.0;
         m_streak = 0;
         m_movers.clear(); // positions from before a respawn mean nothing now
+        m_lastMoverSample = m_lastMoverPrune = -1.0;
         m_outcome.clear(); // respawned: the last input is settled (death already counted)
         m_p1LastT = -1.0;
         m_liveWaited = false;
@@ -6013,7 +6057,7 @@ public:
         bool moved = false;
         if (m_simMovers && !m_movers.empty()) {
             auto it = m_movers.find(obj);
-            if (it != m_movers.end() && it->second.moving(m_simNow, MOVER_FRESH, MOVER_MIN_SPEED) && predictableMover(obj)) {
+            if (it != m_movers.end() && it->second.moving(m_simNow, MOVER_FRESH, MOVER_MIN_SPEED, MOVER_MIN_CONFIRMATIONS) && predictableMover(obj)) {
                 it->second.offsetAt(m_simNow + static_cast<double>(m_simTick + 1) * m_simDtCur, dx, dy);
                 moved = true;
             }
@@ -6029,6 +6073,12 @@ public:
             return false;
         }
         m_simMover = true;
+        if (m_scanSim) {
+            ++m_scanMoverTests;
+            // More beam versions, finer height buckets and one-tick input choices
+            // around this dynamic section; the scan still never controls P1.
+            m_scanWideUntil = std::max(m_scanWideUntil, player->getPositionX() + SCAN_MOVER_WIDE_PAST);
+        }
         if (gap < 0.f && !m_simDead && !m_scanNoclip) { // touches it where it will be
             m_simDead = true;
             m_simKillType = static_cast<int>(obj->m_objectType);
@@ -6042,32 +6092,29 @@ public:
     // Real game, P1's collision step: sample every hazard near you so moving
     // ones get a velocity. Pointers are only used as keys.
     void sampleMovers(PlayLayer* pl, PlayerObject* player, gd::vector<GameObject*>* vec, int count) {
-        // Off since 1.26.0: it logged every nearby spike / orb on every physics
-        // step (240x a second) and in practice never predicted anything
-        // ("moving hazards: 0 tests predicted them") - pure CPU each frame.
-        if (!MOVERS_ON) return;
-        if (!m_enabled || !vec || !pl || player != pl->m_player1) return;
-        // Only the current engine (mini cube) uses moving hazards: skip the
-        // per-step bookkeeping everywhere else.
-        {
-            ModeInfo m;
-            m.add(pl->m_player1);
-            if (m.holdBased()) return; // ship / wave don't use it
-        }
-        int const n = std::min<int>(count, static_cast<int>(vec->size()));
+        if (!MOVERS_ON || (!m_enabled && !scanning()) || !vec || !pl || player != pl->m_player1) return;
         double const t = m_gameTime;
+        // The physics hook can run several times per rendered frame with CBF.
+        // Motion is slow relative to that; sample every half 60-fps frame, enough
+        // for the track's baseline while avoiding a full object-list walk per sub-step.
+        if (m_lastMoverSample >= 0.0 && t - m_lastMoverSample < 0.5) return;
+        m_lastMoverSample = t;
+        int const n = std::min<int>(count, static_cast<int>(vec->size()));
         for (int i = 0; i < n; i++) {
             GameObject* obj = (*vec)[i];
             if (!obj || !(isHazard(obj->m_objectType) || isOrb(obj->m_objectType))) continue;
             m_movers[obj].sample(obj->m_positionX, obj->m_positionY, t, MOVER_MAX_GAP, MOVER_TELEPORT);
         }
-        if (m_movers.size() > MOVER_MAX_TRACKED) {
+        // Entries are pointer keys only (never dereferenced). Prune in batches so
+        // a long level with many hazards cannot grow the table without bound.
+        if (m_lastMoverPrune < 0.0 || t - m_lastMoverPrune >= 2.0) {
+            m_lastMoverPrune = t;
             for (auto it = m_movers.begin(); it != m_movers.end();) {
                 if (t - it->second.t > MOVER_MAX_GAP) it = m_movers.erase(it);
                 else ++it;
             }
-            if (m_movers.size() > MOVER_MAX_TRACKED) m_movers.clear();
         }
+        if (m_movers.size() > MOVER_MAX_TRACKED) m_movers.clear();
     }
 
     // ---- spot memory helpers ---------------------------------------------------
@@ -6417,6 +6464,7 @@ public:
         kv("Status", scanStatus());
         kv("Versions / history", fmt::format("{} / {}", m_beam.size(), m_beamHist.size()));
         kv("Backups / runs / real / skips", fmt::format("{} / {} / {} / {}", m_scanBackups, m_scanJumps, m_scanReal, m_scanSkips));
+        kv("Moving-hazard scan checks", std::to_string(m_scanMoverTests));
         kv("Saved run states", std::to_string(m_anchors.size()));
         kv("Route inputs", std::to_string(m_route.size()));
         return rows;
@@ -6863,7 +6911,7 @@ public:
     SimResult runSim(Ctx const& x, int delay, FollowUp const& f = FollowUp{}, int h = -1) {
         int const hz = (h > 0) ? std::min(h, x.horizon) : x.horizon;
         m_simModern = x.modern;                         // near-miss clearance: current engine only
-        m_simMovers = MOVERS_ON && (x.modern || !x.mode.holdBased()); // moving spikes / orbs (off since 1.26.0)
+        m_simMovers = MOVERS_ON; // moving hazards apply to every gamemode, not just mini cube
         if (x.tapModel && f.at[0] < 0) {
             FollowUp t;
             t.at[0] = delay + x.tapTicks;
@@ -7119,6 +7167,7 @@ public:
             double const minGap = static_cast<double>(dt) * 0.999;
             bool placed = false;
             bool snapped = false;
+            int const droppedBefore = m_queue.dropped();
             // Snap to scan (2.1): the input that ends a gesture - the release
             // after a press that snapped to a cyan dot - snaps to ITS scanned
             // spot (pink dot) too. It used to just keep the press's delay (or go
@@ -7144,6 +7193,15 @@ public:
                 placed = m_queue.pushAt(push, pickFollowUpTime(pl, c, push, minGap), m_gameTime, minGap);
             }
             if (!placed) m_queue.push(push, m_gameTime, minGap);
+            // Capacity is a hard safety boundary: drain the delayed gesture in
+            // order using the same watchdog fallback, then let this physical
+            // input reach GD now. Never swallow a button event on overflow.
+            if (m_queue.dropped() > droppedBefore) {
+                flushQueue(pl);
+                pushLog("input queue full - pending events flushed in order; current input passed through",
+                        COL_YELLOW, false);
+                return pass(Decision::PassBudget);
+            }
             // e.g. the release of a press that already fired: it gets the live check too
             if (!m_live && m_queue.pending()) {
                 m_live = true;
@@ -8002,6 +8060,7 @@ public:
             m_lvlStats.attempts++;
             m_lifeStats.attempts++;
             trace(fmt::format("attempt start at x={:.1f}{}", player->getPositionX(), pl->m_isPracticeMode ? " (practice)" : ""));
+            autoScanOnEnter(pl);
         }
         m_lastStepWall = Clock::now();
 
@@ -8029,9 +8088,9 @@ public:
         }
 
         ensureSimPlayers(pl);
-        // Diagnostics only (1.26.0): a prediction every 8 ticks. It reads 100%
-        // in every mode now; only with "Log: show safe clicks" on.
-        if (cfg().hudVerbose) oneStepCheck(pl, player);
+        // Low-frequency self-check: every 32 physics ticks, only when an
+        // unambiguous full-tick comparison is available (no added per-frame work).
+        if (cfg().accuracy) oneStepCheck(pl, player);
         spotStep(player);
         // Accuracy: has a prediction reached its checkpoint?
         if (m_tracker.active() && pl->m_player1) {
@@ -10278,7 +10337,7 @@ $on_mod(Loaded) {
     queueInMainThread([] {
         if (auto* p = ScanRunner::create()) OverlayManager::get()->addChild(p);
     });
-    log::info("[InputBuffer] loaded (headless video profile)");
+    log::info("[InputBuffer] loaded (live-console profile)");
 }
 
 
@@ -10310,7 +10369,7 @@ class $modify(BufPlayLayer, PlayLayer) {
     void pauseGame(bool p0) {
         if (!s_sim.realScanning()) s_sim.onPause(this);
         PlayLayer::pauseGame(p0);
-        if (p0 && m_isPaused && !s_sim.realScanning()) s_sim.autoScanOnPause(this);
+        // Automatic scanning starts on the first real physics step, not on pause.
     }
 
     void destroyPlayer(PlayerObject* player, GameObject* gameObject) {
