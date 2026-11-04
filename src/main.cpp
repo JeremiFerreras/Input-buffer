@@ -1188,7 +1188,7 @@ constexpr int    SCAN_BEAM               = 64;    // versions kept alive at once
 constexpr float  SCAN_SAFE_CLR           = 12.f;  // closer than this to a hazard costs the route (guide keeps a margin)
 constexpr float  SCAN_CLOSE_COST         = 0.25f; // cost per step spent right at a hazard (an input costs 1)
 constexpr float  SCAN_Y_BUCKET           = 3.f;   // versions closer than this in height count as the same
-constexpr int    SCAN_SLICE_US           = 1000;  // lightweight CPU slice per rendered frame while playing (~1 ms)
+constexpr int    SCAN_SLICE_US           = 250;   // tiny CPU slice per rendered frame while playing (~0.25 ms)
 constexpr int    SCAN_BEAM_WIDE          = 256;   // "trying harder" after backing up: 4x the versions ...
 constexpr float  SCAN_Y_BUCKET_WIDE      = 1.5f;  // ... finer heights, and a switch every tick
 constexpr float  SCAN_REWIND_EVERY       = 40.f;  // keep a copy of the versions every 40 px ...
@@ -5458,6 +5458,24 @@ public:
     }
 
     void quit() {
+        // Give the console a useful, bounded report even when verbose tracing
+        // and CSV export are disabled. These totals only run once on level exit.
+        auto const& pred = m_tracker.stats();
+        int oneN = 0, oneExact = 0;
+        float oneWorst = 0.f;
+        for (auto const& [mode, o] : m_oneStep) {
+            oneN += o.n;
+            oneExact += o.exact;
+            oneWorst = std::max(oneWorst, o.worst);
+        }
+        if (LogConsole::on() && (pred.checks > 0 || oneN > 0)) {
+            LogConsole::write(
+                fmt::format("[InputBuffer] Prediction diagnostics: click checkpoints {}/{} within {:.1f}px, "
+                            "average error {:.2f}px, died first {}, skipped {}; one-tick exact {}/{} (worst {:.2f}px)",
+                            pred.hits, pred.checks, ACCURACY_TOL_PX, pred.avgErr(), pred.deaths, pred.dropped,
+                            oneExact, oneN, oneWorst),
+                {255, 255, 255});
+        }
         if ((m_logDebug || m_logCsv) && m_stats.clicks > 0) {
             std::string text = summary();
             log::info("[InputBuffer] session: {}", text);
