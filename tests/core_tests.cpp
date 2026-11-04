@@ -303,7 +303,32 @@ static void testQueue() {
         std::printf("  12-tap spam held 8 ticks @170fps+CBF: old fired %d presses, new %d\n", countPress(o), countPress(n));
     }
 
-    // 6. Queue idles again once drained; next input is decided normally.
+    // 7. The fixed capacity rejects overflow without corrupting queued order.
+    {
+        InputQueue q;
+        q.start(true, 0.0, 0.0);
+        bool expected = true;
+        for (size_t i = 1; i < InputQueue::MAX_EVENTS; i++) {
+            expected = !expected;
+            CHECK(q.push(expected, static_cast<double>(i) * 0.1, 0.01),
+                  "event %zu rejected before capacity", i);
+        }
+        int const before = q.dropped();
+        CHECK(!q.push(!expected, 4.0, 0.01), "overflow event unexpectedly accepted");
+        CHECK(q.dropped() == before + 1, "dropped count=%d expected=%d", q.dropped(), before + 1);
+        CHECK(q.size() == InputQueue::MAX_EVENTS, "size=%zu expected=%zu", q.size(), InputQueue::MAX_EVENTS);
+
+        size_t fired = 0;
+        expected = true;
+        while (auto event = q.poll(1e9)) {
+            CHECK(*event == expected, "event %zu out of order", fired);
+            expected = !expected;
+            fired++;
+        }
+        CHECK(fired == InputQueue::MAX_EVENTS, "fired=%zu expected=%zu", fired, InputQueue::MAX_EVENTS);
+    }
+
+    // 8. Queue idles again once drained; next input is decided normally.
     {
         InputQueue q;
         q.start(true, 0.0, 1.0);
