@@ -19,7 +19,7 @@ A separate Windows console displays stage changes, scan progress, and useful pre
 
 ## Scan limitations
 
-The scan does not require pausing. It uses a snapshot of the player's initial live state and hidden simulation players, targeting about 1 ms of processing per rendered frame. Dual and platformer sections are skipped. Moving objects, trigger-driven changes, and unsupported mechanics can make a route approximate or incomplete. Route snapping is experimental and disabled by default.
+The scan does not require pausing. It uses a snapshot of the player's initial live state and hidden simulation players, targeting about 0.25 ms of processing per rendered frame. Dual and platformer sections are skipped. Moving objects, trigger-driven changes, and unsupported mechanics can make a route approximate or incomplete. Route snapping is experimental and disabled by default.
 
 ## Prediction profiles
 
