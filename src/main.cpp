@@ -1,5 +1,5 @@
 // ============================================================================
-//  Input Buffer  v1.24.1                    (Geode mod for Geometry Dash)
+//  Geode Predictive Input Buffer  v4.7.0 (Geometry Dash / Geode)
 //
 //  WHAT THIS MOD IS
 //  ----------------
@@ -1371,8 +1371,8 @@ struct Config {
             c.extremeWindow = 0;
             c.extremeHoldCap = 0;
         }
-        // This fork intentionally has no in-game Input Buffer panel, path overlay,
-        // badge, or orb-helper visuals. The external console is the only UI.
+        // This console-first profile intentionally keeps the gameplay view clear.
+        // Prediction and scanning run on hidden players; status is shown externally.
         c.hudScale   = 1.0f;
         c.hud        = false;
         c.hudVerbose = false;
@@ -2093,7 +2093,7 @@ struct LogConsole {
             if (HMENU m = GetSystemMenu(w, FALSE)) DeleteMenu(m, SC_CLOSE, MF_BYCOMMAND);
         }
         s_on = true;
-        write("[InputBuffer] v4.6 LOADED (Wave Spikes/Saws Trajectory Fix)", {255, 255, 255});
+        write("[InputBuffer] v4.7.0 LOADED (Predictive Input Assistance)", {255, 255, 255});
         int const stage = stageFromSetting(Mod::get()->getSettingValue<std::string>("stage"));
         if (stage == 0) {
             write("[InputBuffer] Starting Mode: OFF (100% Raw Input)", {255, 255, 255});
@@ -10337,7 +10337,7 @@ $on_mod(Loaded) {
     queueInMainThread([] {
         if (auto* p = ScanRunner::create()) OverlayManager::get()->addChild(p);
     });
-    log::info("[InputBuffer] loaded (headless video profile)");
+    log::info("[InputBuffer] loaded (live-console profile)");
 }
 
 

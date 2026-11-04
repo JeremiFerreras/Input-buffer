@@ -1,28 +1,48 @@
 # Geode Predictive Input Buffer
 
-A Geometry Dash Geode mod that recreates the predictive input-buffer and live-console workflow shown in **“Top Players are cheating in Geometry Dash”**. It simulates short player trajectories, looks for safer input timing, and can delay eligible inputs so they reach the game on a later physics tick.
+[![Build](https://github.com/JeremiFerreras/Input-buffer/actions/workflows/build.yml/badge.svg)](https://github.com/JeremiFerreras/Input-buffer/actions/workflows/build.yml)
 
-This is a community recreation / experimental fork, not an official Geometry Dash feature. The hidden simulator is separate from the live player; the mod does not move the real player to test a prediction.
+**Input-timing assistance for Geometry Dash.** Predictive Input Buffer checks the trajectory that follows an input and, when necessary, delays that input to the earliest safer physics tick inside your selected timing window.
 
-## Features
+The goal is to make difficult timings more forgiving while keeping the player in control. This is an assist mod, **not an auto-player or level bot**: it does not invent clicks, steer the icon, or complete sections for you. It only works with inputs you physically make.
 
-- **Predictive input buffering:** checks whether an input made now is likely to survive, then searches for a safer delay inside the active stage's window.
-- **Preserved input gestures:** queued presses and releases retain their order and spacing. If the queue reaches its hard limit, pending events are flushed in order and the new physical input is passed through instead of being swallowed.
-- **Live prediction diagnostics:** compares predicted and real player positions after the click checkpoint, reports meaningful misses, and performs a low-frequency one-tick self-check when a clean comparison is available.
-- **Moving-hazard prediction:** samples nearby hazards at a throttled rate and only forecasts a visible, axis-aligned mover after two consecutive position predictions have been validated. Otherwise Geometry Dash's normal collision check remains in use.
-- **Automatic level scan:** starts on the first real physics step after entering a compatible level. It continues in small CPU slices while the level is playing; pausing is not required.
-- **Separate Windows console:** status and useful diagnostics are written to a command-prompt console.
+## What it does
+
+- **Predicts before passing an input.** Hidden simulator players test short trajectories using the current player state. If the input is already safe, it passes through unchanged.
+- **Finds the earliest safer tick.** If the immediate trajectory is predicted to die, the mod searches the active stage's allowed delay window and buffers the input only when it finds a usable timing.
+- **Preserves your gesture.** Presses and releases remain ordered, with their spacing maintained while a buffered input is waiting.
+- **Checks moving hazards conservatively.** A visible, axis-aligned hazard is predicted at its future position only after its movement model has passed consecutive accuracy checks. Otherwise the game keeps its normal collision handling.
+- **Scans compatible levels.** A hidden beam scanner explores possible input routes in small CPU slices while the level continues to play. It never takes control of the real player.
+- **Shows its decisions.** The separate Windows console reports stage changes, scan progress, safe inputs, buffered inputs, and prediction diagnostics.
+
+## Install
+
+1. Install [Geode](https://geode-sdk.org/) for Geometry Dash 2.2081.
+2. Open the repository's [GitHub Actions builds](https://github.com/JeremiFerreras/Input-buffer/actions/workflows/build.yml).
+3. Download the **Mod Windows** artifact from the latest successful run and extract the ZIP.
+4. Install the included `.geode` file with Geode, or place it in the game's `geode/mods` folder.
+5. Launch Geometry Dash. On Windows, the live console opens with the mod.
+
+The workflow currently produces a Windows build. The external command-prompt console is Windows-only.
 
 ## Controls
 
 | Key | Action |
 |---|---|
-| `F6` | Cycle Stage 1 → Stage 2 → Stage 3 → Stage 4 → Off |
-| `F7` | Close / reopen the Windows live console |
+| `F6` | Cycle the prediction stage |
+| `F7` | Close or reopen the live console |
 
-The prediction stages use these base-tick windows:
+The stage cycle is:
 
-| Stage | All inputs | Wave inputs |
+`Stage 1 → Stage 2 → Stage 3 → Stage 4 → Off → Stage 1`
+
+You can change the keybinds in the mod's Geode settings.
+
+## Prediction stages
+
+The stage is the maximum delay the predictor may use. It does not force every input to wait: an input that is already safe passes through immediately.
+
+| Stage | All modes | Wave |
 |---|---:|---:|
 | Stage 1 | 2 ticks | 2 ticks |
 | Stage 2 | 4 ticks | 4 ticks |
@@ -30,37 +50,73 @@ The prediction stages use these base-tick windows:
 | Stage 4 | 16 ticks | 8 ticks |
 | Off | No buffering | No buffering |
 
-The stages are fixed profiles. Automatic/adaptive window calibration is not enabled in this fork.
+A base tick is approximately 1/240 of a second at the default 240-TPS physics rate. Four base ticks are approximately one 60-FPS frame. The engine uses the game's detected physics timing, so the real-time duration follows the active timing configuration.
 
-## Automatic scan
+Larger stages give the predictor more room to find a safe moment, but can make an assisted input feel later. Start with Stage 1 and increase the window only when you need more room.
 
-The scan begins after Geometry Dash has initialized the attempt's real player state. It then explores trajectories using hidden simulation players, with a target budget of about **0.25 ms per rendered frame**. The real level keeps running normally.
+## Reading the console
 
-The scanner currently skips dual and platformer sections. When it encounters a confidently tracked moving hazard, it temporarily increases beam width, uses finer height buckets, and tests input changes every tick for the nearby section. This spends the same fixed scan budget more carefully around dynamic obstacles; it does not raise the per-frame CPU budget. Rotating hazards, trigger-driven changes, unsupported mechanics, and complex portal interactions can still produce incomplete or approximate routes. **Use Scanned Route** remains experimental and is off by default; the scan never drives the real player, and a completed route is not a guarantee that every section is safe.
+The console uses short decision labels:
+
+- **PERFECT** — the current input is predicted to be safe, so it passes through without a delay.
+- **SAVED +N TICKS** — the current timing is predicted to be unsafe and the input is scheduled N physics ticks later. The line also reports the mode, original and delayed frame positions, number of tested delay candidates, simulation time, and active limit.
+- **RAW** — the predictor could not safely make a timing change, for example because the path reaches an unsupported mechanic, the delay window has no solution, or the simulation budget is exhausted.
+
+A `SAVED` message is the simulator's prediction and scheduling decision, not a guarantee against every possible in-game collision. The real game state and supported mechanics still determine what happens.
+
+## Automatic level scan
+
+Automatic Level Scan is enabled by default. It starts after the first real physics step of a compatible attempt and explores the level using hidden simulation players. It continues in small slices while you play, with a target budget of about **0.25 ms per rendered frame**.
+
+When a confidently tracked moving hazard is encountered, the scanner temporarily increases its search width, uses finer height buckets, and tests possible input changes every tick around that area. The per-frame scan budget stays the same.
+
+The scan currently does not start in dual or platformer gameplay. Trigger-driven changes, rotating hazards, unsupported objects, and complex portal interactions can still make a scanned route incomplete or approximate.
+
+### Use Scanned Route
+
+The **Use Scanned Route** setting is off by default. When enabled, an early physical input can be aligned with a matching input point from the scanned route. This feature only adjusts an input you make; it does not create inputs or drive the player. Because route data can be incomplete on unsupported sections, keep it off unless you have checked the scan for that level.
+
+## Settings
+
+| Setting | Default | Purpose |
+|---|---|---|
+| Prediction Stage | Stage 1 | Selects the maximum delay window |
+| Stage Cycle Key | F6 | Changes the active stage |
+| Console Toggle Key | F7 | Shows or hides the Windows console |
+| Automatic Level Scan | On | Scans supported levels on attempt entry |
+| Use Scanned Route | Off | Optionally aligns early manual inputs to a scanned route |
 
 ## Compatibility and limitations
 
-The project is configured for Geode 5.11.2 and Geometry Dash 2.2081. The external command-prompt console is Windows-only. Prediction is best-effort: no delay can save every input, and game mods that change physics or intercept inputs can affect results.
+- Configured for **Geometry Dash 2.2081** and **Geode 5.11.2**.
+- The GitHub Actions package currently builds and verifies Windows.
+- The separate command-prompt console is Windows-only.
+- The predictor supports many common gameplay mechanics, but not every object, trigger, portal sequence, or third-party physics modification.
+- Moving-hazard forecasts are limited to visible, axis-aligned hazards with a sufficiently validated motion model. Untrusted movement is left to Geometry Dash's normal collision handling.
+- Dual and platformer gameplay are not supported by the automatic scan.
+- No delay can save an input when no safe timing exists inside the active stage window.
 
-The core unit tests exercise the scheduling and prediction helpers without launching Geometry Dash. They do not prove that every in-game collision or level mechanic is modelled perfectly.
+Mods that alter physics, TPS, or input dispatch can affect predictions. For leaderboard or submitted runs, check the rules of the relevant list or event before using any input-assistance mod.
 
-## Build and tests
+## Build from source
 
-The GitHub Actions workflow builds the mod for Windows and separately compiles/runs the standalone core tests.
-
-With a local Geode SDK installation:
+Requirements: Geode SDK 5.11.2, Geometry Dash 2.2081 bindings, CMake, and a C++23 compiler.
 
 ```sh
 geode build
 ```
 
-To run the core tests directly with a C++23 compiler:
+Run the standalone core tests with a C++23 compiler:
 
 ```sh
 g++ -std=c++23 -O2 -Isrc tests/core_tests.cpp -o core_tests
 ./core_tests
 ```
 
-## Reference
+The core tests cover scheduling and prediction helpers. They do not simulate every Geometry Dash object or replace in-game verification.
 
-Workflow and presentation reference: **“Top Players are cheating in Geometry Dash”** (video supplied for this project).
+## Credits
+
+The trajectory-simulation and input-scheduling engine builds on the **Input Buffer** project by **AlQuerez23**. This project adds its own timing-stage configuration, console presentation, diagnostics, scanning behavior, and maintenance.
+
+Predictive Input Buffer is an independent community mod and is not affiliated with or endorsed by RobTop Games.

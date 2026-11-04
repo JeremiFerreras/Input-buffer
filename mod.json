@@ -6,11 +6,11 @@
 		"android": "2.2081",
 		"ios": "2.2081"
 	},
-	"version": "v4.6.0",
+	"version": "v4.7.0",
 	"id": "geodepredictive.inputbuffer",
 	"name": "Geode Predictive Input Buffer",
-	"developer": "Custom fork",
-	"description": "Trajectory-prediction input buffer with video-style Windows console; based on Input Buffer's simulation engine.",
+	"developer": "Jeremi Ferreras",
+	"description": "Input-timing assistance for Geometry Dash. Predicts short player trajectories and buffers eligible inputs to safer physics ticks without automating gameplay.",
 	"resources": {
 		"sprites": [
 			"resources/*.png"
@@ -27,7 +27,7 @@
 		"stage": {
 			"type": "string",
 			"name": "Prediction Stage",
-			"description": "F6 cycles Stage 1 (2/2 base ticks), Stage 2 (4/4), Stage 3 (8/8), Stage 4 (16/8), and Off. Values are All / Wave.",
+			"description": "Sets the maximum number of ticks an input may be delayed. Safe inputs are still passed through immediately. F6 cycles Stage 1 (2/2 ticks), Stage 2 (4/4), Stage 3 (8/8), Stage 4 (16/8), and Off. Values are All modes / Wave.",
 			"default": "Stage 1",
 			"one-of": [
 				"Off",
@@ -40,27 +40,27 @@
 		"cycle-key": {
 			"type": "keybind",
 			"name": "Stage Cycle Key",
-			"description": "Cycles the video-matched prediction stages.",
+			"description": "Cycles the active prediction stage while playing. Default: F6.",
 			"default": "F6",
 			"category": "gameplay"
 		},
 		"console-key": {
 			"type": "keybind",
 			"name": "Console Toggle Key",
-			"description": "Closes or reopens the live command-prompt console on Windows.",
+			"description": "Closes or reopens the live command-prompt console on Windows. Default: F7.",
 			"default": "F7",
 			"category": "general"
 		},
 		"auto-scan": {
 			"type": "bool",
 			"name": "Automatic Level Scan",
-			"description": "Start after the first real physics step on a compatible level. The hidden scanner continues in small CPU slices while you play; it never controls the real player.",
+			"description": "Starts a hidden scan after the first real physics step of a compatible attempt. It continues in small CPU slices while the level plays and never controls the real player.",
 			"default": true
 		},
 		"route-snap": {
 			"type": "bool",
-			"name": "Use Scanned Route (Experimental)",
-			"description": "Let early inputs match the route found by automatic scanning. Off by default because a scan can be imperfect on portal-heavy or otherwise unsupported levels.",
+			"name": "Use Scanned Route",
+			"description": "Optionally align an early physical input with a matching point in the scanned route. Off by default. This setting never creates inputs or controls the player, and route data can be incomplete around unsupported mechanics.",
 			"default": false
 		}
 	}
