@@ -9,6 +9,7 @@ This is a community recreation / experimental fork, not an official Geometry Das
 - **Predictive input buffering:** checks whether an input made now is likely to survive, then searches for a safer delay inside the active stage's window.
 - **Preserved input gestures:** queued presses and releases retain their order and spacing. If the queue reaches its hard limit, pending events are flushed in order and the new physical input is passed through instead of being swallowed.
 - **Live prediction diagnostics:** compares predicted and real player positions after the click checkpoint, reports meaningful misses, and performs a low-frequency one-tick self-check when a clean comparison is available.
+- **Moving-hazard prediction:** samples nearby hazards at a throttled rate and only forecasts a visible, axis-aligned mover after two consecutive position predictions have been validated. Otherwise Geometry Dash's normal collision check remains in use.
 - **Automatic level scan:** starts on the first real physics step after entering a compatible level. It continues in small CPU slices while the level is playing; pausing is not required.
 - **Separate Windows console:** status and useful diagnostics are written to a command-prompt console.
 
@@ -35,7 +36,7 @@ The stages are fixed profiles. Automatic/adaptive window calibration is not enab
 
 The scan begins after Geometry Dash has initialized the attempt's real player state. It then explores trajectories using hidden simulation players, with a target budget of about **0.25 ms per rendered frame**. The real level keeps running normally.
 
-The scanner currently skips dual and platformer sections. Levels with moving objects, trigger-driven changes, unsupported mechanics, or complex portal interactions can produce incomplete or approximate routes. **Use Scanned Route** remains experimental and is off by default; a completed scan is not a guarantee that every route is safe.
+The scanner currently skips dual and platformer sections. When it encounters a confidently tracked moving hazard, it temporarily increases beam width, uses finer height buckets, and tests input changes every tick for the nearby section. This spends the same fixed scan budget more carefully around dynamic obstacles; it does not raise the per-frame CPU budget. Rotating hazards, trigger-driven changes, unsupported mechanics, and complex portal interactions can still produce incomplete or approximate routes. **Use Scanned Route** remains experimental and is off by default; the scan never drives the real player, and a completed route is not a guarantee that every section is safe.
 
 ## Compatibility and limitations
 
