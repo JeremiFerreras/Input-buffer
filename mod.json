@@ -54,7 +54,7 @@
 		"auto-scan": {
 			"type": "bool",
 			"name": "Automatic Level Scan",
-			"description": "Automatically scan a compatible level the first time it is paused. Scanning runs in small CPU slices and requires the level to stay paused.",
+			"description": "Start after the first real physics step on a compatible level. The hidden scanner continues in small CPU slices while you play; it never controls the real player.",
 			"default": true
 		},
 		"route-snap": {
