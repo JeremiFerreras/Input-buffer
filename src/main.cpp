@@ -4316,6 +4316,10 @@ private:
         sim->m_lastPortalPos = real->m_lastPortalPos;
         sim->m_lastGroundedPos = real->m_lastGroundedPos;
         sim->m_lastActivatedPortal = real->m_lastActivatedPortal;
+        // GD uses this GameObject* as the key when storeCollision writes to
+        // the player's collision-log dictionaries. copyAttributes does not
+        // populate it, so the sim player must inherit the live player's value.
+        sim->m_maybeLastGroundObject = real->m_maybeLastGroundObject;
         sim->m_isOnGround2 = real->m_isOnGround2;
         sim->m_lastLandTime = real->m_lastLandTime;
         sim->m_stateOnGround = real->m_stateOnGround;
