@@ -1,30 +1,27 @@
 # Geode Predictive Input Buffer
 
-**Unreleased personal-testing fork for Geometry Dash and Geode.** This project adapts the trajectory-simulation and input-scheduling engine from Input Buffer into a compact, keyboard-controlled workflow with a separate Windows command-prompt console.
+**Experimental Geometry Dash / Geode recreation** of the predictive input-buffer and live-console workflow shown in the supplied video, “Top Players are cheating in Geometry Dash”.
 
 ## Overview
 
-Geode Predictive Input Buffer uses simulated player trajectories to look for input timings that may avoid a predicted collision, then schedules eligible inputs through a configurable buffer. It also includes an optional scanned-route experiment for supported levels.
+The mod simulates short player trajectories to estimate whether an input made now is safe. When a safer timing is found inside the current stage window, eligible inputs are buffered and replayed on a later physics tick. Presses and releases are kept in order so the original gesture is preserved.
 
-The mod is intended for local development and private testing. It is not an official Geometry Dash feature, and this project is not being presented as a public Geode release.
+A separate Windows console displays stage changes, scan progress, and useful prediction diagnostics. The simulator uses hidden player objects; it does not move the real player to test candidate trajectories.
 
 ## Features
 
-- **Prediction engine:** retains the supplied Input Buffer simulation and scheduling core.
-- **Console-first workflow:** sends status and input-buffer messages to a separate Windows console instead of displaying the original Input Buffer overlay.
-- **Prediction stages:** cycles through four timing profiles and an Off mode.
-- **Automatic scan:** can begin scanning a compatible level when it is paused, using small processing slices while paused.
-- **Optional scanned route:** experimental and disabled by default because scan results may be incomplete on complex or unsupported levels.
-- **GitHub Actions build:** includes the project workflow for building against the configured Geode SDK.
+- Predictive trajectory checks and bounded delay search.
+- Queue safety fallback: if the event queue reaches capacity, pending events are flushed in order and the new physical input is allowed through.
+- Prediction accuracy checks against the real player, plus a low-frequency one-tick self-check.
+- Automatic level scan from the first real physics step, continuing in small CPU slices while the level plays.
+- Windows command-prompt console, toggled with F7.
+- Stage cycle on F6: Stage 1 → Stage 2 → Stage 3 → Stage 4 → Off.
 
-## Controls
+## Scan limitations
 
-| Key | Action |
-|---|---|
-| `F6` | Cycle Stage 1 → Stage 2 → Stage 3 → Stage 4 → Off |
-| `F7` | Close or reopen the Windows live console |
+The scan does not require pausing. It uses a snapshot of the player's initial live state and hidden simulation players, targeting about 1 ms of processing per rendered frame. Dual and platformer sections are skipped. Moving objects, trigger-driven changes, and unsupported mechanics can make a route approximate or incomplete. Route snapping is experimental and disabled by default.
 
-The stages correspond to the following base-tick limits:
+## Prediction profiles
 
 | Stage | All inputs | Wave inputs |
 |---|---:|---:|
@@ -34,16 +31,8 @@ The stages correspond to the following base-tick limits:
 | Stage 4 | 16 ticks | 8 ticks |
 | Off | No buffering | No buffering |
 
-Actual simulation behavior depends on the game's detected physics timing and the supported mechanics in a level.
+Adaptive calibration is intentionally not enabled. Actual behavior still depends on the detected physics timing and mechanics supported by the simulator.
 
-## Important limitations
+## Build and validation
 
-This is a prediction tool, not a guarantee that every death can be prevented. Some inputs have no safe delay, and predicted routes can be inaccurate on levels with unsupported objects, complex portal sequences, dual gameplay, platformer mechanics, or other interactions the simulator does not fully model. The automatic scanner requires a stable paused level and does not scan every level type. The external command-prompt console is Windows-only.
-
-A successful unit-test run validates the tested scheduling logic; it does **not** prove that collision prediction is always correct in live gameplay. Test changes carefully in Geometry Dash.
-
-## Credits
-To the me and the IA
-## Build
-
-Use the repository's GitHub Actions workflow to compile the source with the configured Geode SDK. See `README.md` for the build steps and test limitations.
+GitHub Actions builds the Windows Geode mod and runs the standalone C++23 core tests. Passing those tests validates the covered helper logic only; it does not guarantee perfect collision prediction in every live level.
