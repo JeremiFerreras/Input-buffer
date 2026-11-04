@@ -33,7 +33,7 @@ The stages are fixed profiles. Automatic/adaptive window calibration is not enab
 
 ## Automatic scan
 
-The scan begins after Geometry Dash has initialized the attempt's real player state. It then explores trajectories using hidden simulation players, with a target budget of about **1 ms per rendered frame**. The real level keeps running normally.
+The scan begins after Geometry Dash has initialized the attempt's real player state. It then explores trajectories using hidden simulation players, with a target budget of about **0.25 ms per rendered frame**. The real level keeps running normally.
 
 The scanner currently skips dual and platformer sections. Levels with moving objects, trigger-driven changes, unsupported mechanics, or complex portal interactions can produce incomplete or approximate routes. **Use Scanned Route** remains experimental and is off by default; a completed scan is not a guarantee that every route is safe.
 
