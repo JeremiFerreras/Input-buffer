@@ -1188,7 +1188,7 @@ constexpr int    SCAN_BEAM               = 64;    // versions kept alive at once
 constexpr float  SCAN_SAFE_CLR           = 12.f;  // closer than this to a hazard costs the route (guide keeps a margin)
 constexpr float  SCAN_CLOSE_COST         = 0.25f; // cost per step spent right at a hazard (an input costs 1)
 constexpr float  SCAN_Y_BUCKET           = 3.f;   // versions closer than this in height count as the same
-constexpr int    SCAN_SLICE_US           = 2000;  // lightweight CPU slice per frame while paused (2 ms)
+constexpr int    SCAN_SLICE_US           = 1000;  // lightweight CPU slice per rendered frame while playing (~1 ms)
 constexpr int    SCAN_BEAM_WIDE          = 256;   // "trying harder" after backing up: 4x the versions ...
 constexpr float  SCAN_Y_BUCKET_WIDE      = 1.5f;  // ... finer heights, and a switch every tick
 constexpr float  SCAN_REWIND_EVERY       = 40.f;  // keep a copy of the versions every 40 px ...
@@ -1382,7 +1382,7 @@ struct Config {
         c.realScan   = false;
         c.learnSpots = mod->getSavedValue<bool>("learn-spots", true);
         c.showBadge  = false;
-        c.accuracy   = false;
+        c.accuracy   = true;
         return c;
     }
 };
@@ -3314,12 +3314,11 @@ public:
     void startScan(PlayLayer* pl) {
         if (scanning()) return;
         m_scanMsg.clear();
-        if (!pl || !pl->m_player1 || pl->m_player1->m_isDead) { m_scanMsg = "open a level and pause it first"; return; }
-        if (!pl->m_isPaused) { m_scanMsg = "pause the level first (it scans while paused)"; return; }
+        if (!pl || !pl->m_player1 || pl->m_player1->m_isDead) { m_scanMsg = "waiting for a live player"; return; }
         if (m_attemptPending) {
-            // Paused before the first tick: a start position hasn't placed the
-            // player yet, so the scan would run from the level's default spawn.
-            m_scanMsg = "let the attempt start first (unpause for a moment, then pause and scan)";
+            // Wait for Geometry Dash's first real physics step so the copied
+            // player state contains the actual attempt spawn, not the level default.
+            m_scanMsg = "waiting for the first physics step";
             return;
         }
         if (pl->m_gameState.m_isDualMode || pl->m_player1->m_isPlatformer) { m_scanMsg = "can't scan dual or platformer parts"; return; }
@@ -3351,7 +3350,10 @@ public:
         m_scanPortalTraces = 0;
         m_scanModeSwitches = 0;
         BeamNode root;
-        root.fromReal = true;
+        // Scan from an immutable snapshot of the first live physics step. The
+        // real player keeps playing; only the hidden simulation uses this copy.
+        root.fromReal = false;
+        root.snap = snapFrom(pl->m_player1);
         root.mode = scanModeIndex(pl->m_player1);
         root.modeCode = modeCode(pl->m_player1);
         root.held = m_gameHolding;
@@ -3368,18 +3370,15 @@ public:
                           pl->m_player1->getPositionY(), m_scanMode.name(), pl->m_player1->m_playerSpeed, pl->m_levelLength));
     }
 
-    // Automatically start a level scan on the first compatible pause. The scan
-    // engine mutates a hidden simulation and requires the actual level to remain
-    // paused; it is deliberately not run against a moving live level.
-    void autoScanOnPause(PlayLayer* pl) {
+    // Start automatically as soon as the first real physics step has placed
+    // the player. The scan advances on the overlay runner in small slices while
+    // the level continues; it never pauses or drives the real player.
+    void autoScanOnEnter(PlayLayer* pl) {
         if (!Mod::get()->getSettingValue<bool>("auto-scan")) return;
         if (scanning() || m_autoScanComplete) return;
-        // If the player unpaused before the scan finished, a later pause starts
-        // another segment from the current real-player position. routeMerge()
-        // preserves the useful part of the earlier partial scan.
         startScan(pl);
         if (scanning()) {
-            LogConsole::write("[InputBuffer] Auto scan started (small CPU slices while paused).", {255, 255, 255});
+            LogConsole::write("[InputBuffer] Auto scan started on level entry (small slices while playing).", {255, 255, 255});
         } else if (!m_scanMsg.empty()) {
             LogConsole::write(fmt::format("[InputBuffer] Auto scan skipped: {}", m_scanMsg), {255, 255, 255});
         }
@@ -3492,11 +3491,6 @@ public:
         PlayLayer* pl = PlayLayer::get();
         if (!pl || !m_simPlayer1.data() || !pl->m_player1) {
             m_scanState = ScanState::Off; m_beam.clear(); m_beamHist.clear(); m_scanMsg = "stopped (left the level)"; return;
-        }
-        if (!pl->m_isPaused) {
-            if (m_realScan) realScanAbort(pl, "unpaused"); // the level goes back to where you paused first
-            finishScan(pl, fmt::format("stopped at {:.0f}% - stay paused while it scans", pctAt(pl, m_scanX)), &m_beam);
-            return;
         }
         int const scanPct = static_cast<int>(std::floor(std::clamp(pctAt(pl, m_scanX), 0.f, 100.f) / 10.f)) * 10;
         if (scanPct >= m_consoleScanPct + 10 && scanPct < 100) {
@@ -4530,7 +4524,7 @@ private:
                 }
             }
         }
-        if ((m_tick & 7) != 0 || m_queue.pending() || p->m_isDead || m_simulating || tickPhase() > 0.f) return;
+        if ((m_tick & 31) != 0 || m_queue.pending() || p->m_isDead || m_simulating || tickPhase() > 0.f) return;
         PlayerObject* p2 = (pl->m_gameState.m_isDualMode && pl->m_player2) ? pl->m_player2 : nullptr;
         bool const simP2 = p2 && !(pl->m_level && pl->m_level->m_twoPlayerMode);
         bool const rec = m_recordPath;
@@ -7119,6 +7113,7 @@ public:
             double const minGap = static_cast<double>(dt) * 0.999;
             bool placed = false;
             bool snapped = false;
+            int const droppedBefore = m_queue.dropped();
             // Snap to scan (2.1): the input that ends a gesture - the release
             // after a press that snapped to a cyan dot - snaps to ITS scanned
             // spot (pink dot) too. It used to just keep the press's delay (or go
@@ -7144,6 +7139,15 @@ public:
                 placed = m_queue.pushAt(push, pickFollowUpTime(pl, c, push, minGap), m_gameTime, minGap);
             }
             if (!placed) m_queue.push(push, m_gameTime, minGap);
+            // Capacity is a hard safety boundary: drain the delayed gesture in
+            // order using the same watchdog fallback, then let this physical
+            // input reach GD now. Never swallow a button event on overflow.
+            if (m_queue.dropped() > droppedBefore) {
+                flushQueue(pl);
+                pushLog("input queue full - pending events flushed in order; current input passed through",
+                        COL_YELLOW, false);
+                return pass(Decision::PassBudget);
+            }
             // e.g. the release of a press that already fired: it gets the live check too
             if (!m_live && m_queue.pending()) {
                 m_live = true;
@@ -8002,6 +8006,7 @@ public:
             m_lvlStats.attempts++;
             m_lifeStats.attempts++;
             trace(fmt::format("attempt start at x={:.1f}{}", player->getPositionX(), pl->m_isPracticeMode ? " (practice)" : ""));
+            autoScanOnEnter(pl);
         }
         m_lastStepWall = Clock::now();
 
@@ -8029,9 +8034,9 @@ public:
         }
 
         ensureSimPlayers(pl);
-        // Diagnostics only (1.26.0): a prediction every 8 ticks. It reads 100%
-        // in every mode now; only with "Log: show safe clicks" on.
-        if (cfg().hudVerbose) oneStepCheck(pl, player);
+        // Low-frequency self-check: every 32 physics ticks, only when an
+        // unambiguous full-tick comparison is available (no added per-frame work).
+        if (cfg().accuracy) oneStepCheck(pl, player);
         spotStep(player);
         // Accuracy: has a prediction reached its checkpoint?
         if (m_tracker.active() && pl->m_player1) {
@@ -10310,7 +10315,7 @@ class $modify(BufPlayLayer, PlayLayer) {
     void pauseGame(bool p0) {
         if (!s_sim.realScanning()) s_sim.onPause(this);
         PlayLayer::pauseGame(p0);
-        if (p0 && m_isPaused && !s_sim.realScanning()) s_sim.autoScanOnPause(this);
+        // Automatic scanning starts on the first real physics step, not on pause.
     }
 
     void destroyPlayer(PlayerObject* player, GameObject* gameObject) {
