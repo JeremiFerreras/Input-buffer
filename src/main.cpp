@@ -2342,6 +2342,7 @@ class TrajectoryBufferSim {
     Clock::time_point m_lastStepWall{};      // last physics-step hook call (wall clock)
     Clock::time_point m_pendingSinceWall{};  // when the current held input started waiting
     long long m_watchdogFires = 0;
+    bool m_queueOverflowReported = false; // one warning per level
     long long m_simStepsTotal = 0;   // sim steps run (for us-per-step in Stats)
     long long m_cheapClicks = 0;     // clicks finished with cheap checks (out of time)
     long long m_inputsSeen = 0;      // inputs that reached the buffer this level
@@ -5420,6 +5421,7 @@ public:
         m_horizonScale = 1.0f;
         m_hasDeadline = false;
         m_stats = Stats{};
+        m_queueOverflowReported = false;
         m_planFires = m_planDrifts = m_planTicksSaved = 0;
         m_planTrust = false;
         m_liveUsSum = m_liveChecks = m_liveUsMax = 0;
@@ -7118,6 +7120,20 @@ public:
         };
         // 1. An input is already held back: queue this one behind it so taps are never eaten.
         if (m_queue.active()) {
+            // Never swallow a physical transition when the bounded queue is full.
+            // Drain the accepted events in order, then let this event reach GD raw.
+            if (m_queue.full()) {
+                if (!m_queueOverflowReported) {
+                    m_queueOverflowReported = true;
+                    pushLog("NOTE: input queue reached its 32-event limit; pending inputs were flushed in order and this input was passed through.",
+                            COL_ORANGE, false);
+                }
+                flushQueue(pl);
+                clearBuffer();
+                m_gameHolding = push;
+                rememberInput(pl, push);
+                return true;
+            }
             // Keep order and spacing: replay it after the held input with the same shift.
             // Wave / ship (2.1): on time instead, when that's the safe one.
             double const minGap = static_cast<double>(dt) * 0.999;
