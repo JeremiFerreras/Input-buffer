@@ -2207,18 +2207,19 @@ struct LogConsole {
         std::string remaining = text;
         bool first = true;
         do {
-            std::string const indent = first ? prefix + label : std::string(prefix.size() + label.size(), ' ');
-            size_t const available = WIDTH > indent.size() ? WIDTH - indent.size() : 1;
+            std::string const continuationIndent(prefix.size() + label.size(), ' ');
+            size_t const indentSize = first ? prefix.size() + label.size() : continuationIndent.size();
+            size_t const available = WIDTH > indentSize ? WIDTH - indentSize : 1;
             size_t count = std::min(remaining.size(), available);
             if (count < remaining.size()) {
                 size_t const space = remaining.rfind(' ', count);
                 if (space != std::string::npos && space > 0) count = space;
             }
-            raw(indent, A_MUTED);
-            raw(first ? label : std::string(), tagAttr(tag));
             if (first) {
-                // The timestamp is muted; the tag is colored to match the logo's terminal accents.
-                // Rewrite the prefix separately so the label does not inherit the timestamp color.
+                raw(prefix, A_MUTED);
+                raw(label, tagAttr(tag));
+            } else {
+                raw(continuationIndent, A_MUTED);
             }
             raw(remaining.substr(0, count), bodyAttr);
             raw("\r\n", A_MUTED);

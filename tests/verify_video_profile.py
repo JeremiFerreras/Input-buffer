@@ -86,6 +86,9 @@ class VideoProfileTests(unittest.TestCase):
         ):
             self.assertIn(required, console)
         self.assertIn('if (!s_on || !s_out) return;', console)
+        self.assertIn('raw(prefix, A_MUTED);', console)
+        self.assertIn('raw(label, tagAttr(tag));', console)
+        self.assertNotIn('raw(indent, A_MUTED);', console)
         self.assertNotIn('Sleep(', console)
         self.assertNotIn('std::thread', console)
         self.assertNotIn('SetTimer(', console)
