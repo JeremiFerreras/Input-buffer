@@ -71,9 +71,10 @@ class VideoProfileTests(unittest.TestCase):
     def test_console_uses_logo_palette_and_text_only_ui(self):
         console = SOURCE[SOURCE.index('struct LogConsole {'):SOURCE.index('//  7. TrajectoryBufferSim')]
         for required in (
-            'RGB(3, 5, 17)',
-            'RGB(11, 105, 255)',
+            'RGB(3, 5, 17),       RGB(10, 36, 93)',
+            'RGB(45, 145, 255)',
             'RGB(0, 216, 246)',
+            'RGB(255, 207, 88),  RGB(248, 251, 255)',
             'RGB(142, 62, 255)',
             'RGB(255, 207, 88)',
             'static constexpr WORD A_MUTED  = FOREGROUND_INTENSITY;',

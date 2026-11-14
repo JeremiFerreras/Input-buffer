@@ -2079,8 +2079,8 @@ struct LogConsole {
     static WORD colorAttr(ccColor3B color) {
         if (color.r > 215 && color.g < 155) return A_RED;
         if (color.r > 215 && color.g > 175 && color.b < 165) return A_YELLOW;
+        if (color.b > 190 && color.r < 185 && color.g > 150) return A_CYAN;
         if (color.g > 190 && color.r < 175) return A_GREEN;
-        if (color.b > 190 && color.r < 185) return A_CYAN;
         if (color.b > 185 && color.r > 145) return A_PURPLE;
         if (color.b > 180) return A_BLUE;
         return A_WHITE;
@@ -2148,10 +2148,10 @@ struct LogConsole {
         info.cbSize = sizeof(info);
         if (GetConsoleScreenBufferInfoEx(s_out, &info)) {
             static COLORREF const palette[16] = {
-                RGB(3, 5, 17),       RGB(255, 90, 119),   RGB(72, 255, 178),   RGB(255, 207, 88),
-                RGB(11, 105, 255),   RGB(142, 62, 255),   RGB(0, 216, 246),    RGB(215, 232, 250),
-                RGB(58, 78, 116),    RGB(45, 145, 255),  RGB(92, 255, 202),   RGB(67, 232, 255),
-                RGB(255, 100, 137),  RGB(183, 95, 255),  RGB(198, 255, 115),  RGB(248, 251, 255)
+                RGB(3, 5, 17),       RGB(10, 36, 93),    RGB(19, 92, 75),    RGB(10, 72, 88),
+                RGB(88, 24, 43),      RGB(65, 34, 95),    RGB(95, 66, 21),    RGB(140, 164, 192),
+                RGB(58, 78, 116),     RGB(45, 145, 255),  RGB(72, 255, 178),  RGB(0, 216, 246),
+                RGB(255, 100, 137),   RGB(183, 95, 255),  RGB(255, 207, 88),  RGB(248, 251, 255)
             };
             for (int i = 0; i < 16; ++i) info.ColorTable[i] = palette[i];
             info.wAttributes = A_WHITE;
