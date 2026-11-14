@@ -13,7 +13,7 @@ A Geometry Dash 2.2081 / Geode mod fork that tests input timings against simulat
 - Re-checks delayed inputs against the live player state.
 - Offers five selectable profiles: Stage 1–4 and Off.
 - Can scan supported levels while paused and save an experimental route.
-- Uses a separate Windows command-prompt console for status and diagnostic messages.
+- Uses a separate Windows command-prompt console for important warnings, deaths, stage changes, and scan status. Detailed per-click traces remain in the in-game Log/Dev views and exported reports rather than flooding the live console.
 
 ## Controls
 
@@ -65,7 +65,7 @@ python3 tests/verify_video_profile.py
 python3 -m json.tool mod.json > /dev/null
 ```
 
-The C++ suite exercises the scheduler, timing search, and other pure logic with synthetic inputs. The Python suite checks project metadata and important source/profile invariants. These tests do not emulate Geometry Dash physics or prove in-game prediction accuracy.
+The C++ suite exercises the scheduler, timing search, and other pure logic with synthetic inputs. It also runs 5,000 deterministic queue bursts and 10,000 deterministic monotonic delay-search windows. CI repeats the C++ suite with AddressSanitizer, UndefinedBehaviorSanitizer, and libstdc++ assertions. The Python suite checks project metadata, console-output policy, and important source/profile invariants. These tests do not emulate Geometry Dash physics or prove in-game prediction accuracy.
 
 For live validation, follow [tests/IN_GAME_CHECKLIST.md](tests/IN_GAME_CHECKLIST.md) and record any discrepancy between the console output and the actual player behavior.
 

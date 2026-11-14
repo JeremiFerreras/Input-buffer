@@ -58,7 +58,18 @@ class VideoProfileTests(unittest.TestCase):
             self.assertIn(required, SOURCE, f"console text missing: {required}")
         self.assertIn("{:.1f}f / {:.1f}f @ 60fps", SOURCE)
 
+    def test_live_console_is_concise(self):
+        self.assertIn('static bool consoleWorthy(std::string const& tag)', SOURCE)
+        self.assertIn('return tag == "NOTE" || tag == "DEATH";', SOURCE)
+        self.assertIn('if (LogConsole::on() && consoleWorthy(tag))', SOURCE)
+        self.assertIn('MAX_CONSOLE_HISTORY = 12', SOURCE)
+        self.assertIn('recent.size() < MAX_CONSOLE_HISTORY', SOURCE)
+        self.assertIn('if (!consoleWorthy(it->tag)) continue;', SOURCE)
+        self.assertNotIn('LogConsole::write(fmt::format("{:8.2f}s  {}", levelMs() / 1000.f, line)', SOURCE)
+        self.assertIn('scanPct >= m_consoleScanPct + 25', SOURCE)
+
     def test_no_input_buffer_visuals_enabled(self):
+
         for required in (
             "c.hud        = false;",
             "c.hudVerbose = false;",

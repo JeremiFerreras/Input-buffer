@@ -2696,10 +2696,8 @@ public:
     // ------------------------------------------------------------------------
     static constexpr size_t MAX_TRACE = 2000;
     void trace(std::string line) {
-        // console + "Log: more detail": every click's decision too (log lines are shown already)
-        if (LogConsole::on() && line.rfind("log ", 0) != 0 && cfg().hudVerbose) {
-            LogConsole::write(fmt::format("{:8.2f}s  {}", levelMs() / 1000.f, line), ccColor3B{150, 150, 170});
-        }
+        // Detailed traces stay in the in-game Dev tab / exported report.
+        // The live console is intentionally reserved for important notices.
         m_trace.push_back(fmt::format("{:9.3f} {}", levelMs() / 1000.f, line));
         while (m_trace.size() > MAX_TRACE) m_trace.pop_front();
     }
@@ -3499,8 +3497,8 @@ public:
             finishScan(pl, fmt::format("stopped at {:.0f}% - stay paused while it scans", pctAt(pl, m_scanX)), &m_beam);
             return;
         }
-        int const scanPct = static_cast<int>(std::floor(std::clamp(pctAt(pl, m_scanX), 0.f, 100.f) / 10.f)) * 10;
-        if (scanPct >= m_consoleScanPct + 10 && scanPct < 100) {
+        int const scanPct = static_cast<int>(std::floor(std::clamp(pctAt(pl, m_scanX), 0.f, 100.f) / 25.f)) * 25;
+        if (scanPct >= m_consoleScanPct + 25 && scanPct < 100) {
             m_consoleScanPct = scanPct;
             LogConsole::write(fmt::format("[InputBuffer] Auto scan progress: {}%", scanPct), {255, 255, 255});
         }
@@ -5233,11 +5231,17 @@ private:
         pushTagged(std::move(tag), std::move(text), color, minor);
     }
 
+    static bool consoleWorthy(std::string const& tag) {
+        return tag == "NOTE" || tag == "DEATH";
+    }
+
     void pushTagged(std::string tag, std::string text, ccColor3B color, bool minor = false) {
         trace(fmt::format("log {} {}", tag, text));
         m_logVersion++;
         float const t = levelMs() / 1000.f;
-        if (LogConsole::on()) LogConsole::write(fmt::format("[InputBuffer] {}", text), {255, 255, 255});
+        if (LogConsole::on() && consoleWorthy(tag)) {
+            LogConsole::write(fmt::format("[InputBuffer] {}: {}", tag, text), color);
+        }
         if (!m_history.empty() && m_history.back().text == text && m_history.back().tag == tag) {
             m_history.back().repeat++;
             m_history.back().t = t;
@@ -6441,11 +6445,30 @@ public:
         for (size_t i = from; i < m_trace.size(); i++) out += m_trace[i] + "\n";
         return out;
     }
-    // Console just opened: what's in the Log so far, oldest first.
+    // Console just opened: show only the latest important notices, not the full click log.
     void dumpLogToConsole() {
-        for (auto const& h : m_history) {
-            std::string const rep = h.repeat > 1 ? fmt::format(" (x{})", h.repeat) : std::string();
-            LogConsole::write(fmt::format("{:8.2f}s  {:<6}  {}{}", h.t, h.tag, h.text, rep), logTagColor(h.tag));
+        constexpr size_t MAX_CONSOLE_HISTORY = 12;
+        std::vector<HistEntry const*> recent;
+        recent.reserve(MAX_CONSOLE_HISTORY);
+        for (auto it = m_history.rbegin(); it != m_history.rend() && recent.size() < MAX_CONSOLE_HISTORY; ++it) {
+            if (!consoleWorthy(it->tag)) continue;
+            recent.push_back(&*it);
+        }
+        std::reverse(recent.begin(), recent.end());
+
+        if (recent.empty()) {
+            LogConsole::write("[InputBuffer] No warnings or deaths recorded this session.", {255, 255, 255});
+            return;
+        }
+        size_t importantCount = 0;
+        for (auto const& h : m_history) if (consoleWorthy(h.tag)) importantCount++;
+        if (importantCount > recent.size()) {
+            LogConsole::write("[InputBuffer] Showing the latest 12 warnings/deaths.", {255, 255, 255});
+        }
+        for (auto const* h : recent) {
+            std::string const rep = h->repeat > 1 ? fmt::format(" (x{})", h->repeat) : std::string();
+            LogConsole::write(fmt::format("{:8.2f}s  {:<6}  {}{}", h->t, h->tag, h->text, rep),
+                              logTagColor(h->tag));
         }
     }
     // Latest Log line (for the in-game pill).
