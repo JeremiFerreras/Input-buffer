@@ -12,6 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = (ROOT / "src" / "main.cpp").read_text(encoding="utf-8")
+CORE = (ROOT / "src" / "BufferCore.hpp").read_text(encoding="utf-8")
 MOD = json.loads((ROOT / "mod.json").read_text(encoding="utf-8"))
 
 
@@ -85,6 +86,22 @@ class VideoProfileTests(unittest.TestCase):
         # The scan finisher must not create an in-game notification in this profile.
         finish = SOURCE[SOURCE.index("void finishScan("):SOURCE.index("// Called once per frame by the scan runner.")]
         self.assertNotIn("Notification::create", finish)
+
+    def test_queue_overflow_flushes_and_passes_the_current_input(self):
+        self.assertIn("bool full() const", CORE)
+        start = SOURCE.index("if (m_queue.active()) {")
+        end = SOURCE.index("// 1b. Gamemode switched off", start)
+        overflow_branch = SOURCE[start:end]
+        for required in (
+            "if (m_queue.full())",
+            "flushQueue(pl);",
+            "clearBuffer();",
+            "m_gameHolding = push;",
+            "rememberInput(pl, push);",
+            "return true;",
+        ):
+            self.assertIn(required, overflow_branch)
+        self.assertIn("m_queueOverflowReported = false;", SOURCE)
 
     def test_f6_cycles_five_modes_then_wraps(self):
         self.assertIn("int const next = (cur == STAGE_COUNT - 1) ? 0 : cur + 1;", SOURCE)
