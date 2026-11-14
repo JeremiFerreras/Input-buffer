@@ -60,13 +60,38 @@ class VideoProfileTests(unittest.TestCase):
 
     def test_live_console_is_concise(self):
         self.assertIn('static bool consoleWorthy(std::string const& tag)', SOURCE)
-        self.assertIn('return tag == "NOTE" || tag == "DEATH";', SOURCE)
+        self.assertIn('return tag == "NOTE" || tag == "DEATH" || tag == "BUFFER" || tag == "FIRED";', SOURCE)
         self.assertIn('if (LogConsole::on() && consoleWorthy(tag))', SOURCE)
         self.assertIn('MAX_CONSOLE_HISTORY = 12', SOURCE)
         self.assertIn('recent.size() < MAX_CONSOLE_HISTORY', SOURCE)
         self.assertIn('if (!consoleWorthy(it->tag)) continue;', SOURCE)
-        self.assertNotIn('LogConsole::write(fmt::format("{:8.2f}s  {}", levelMs() / 1000.f, line)', SOURCE)
+        self.assertNotIn('LogConsole::write(', SOURCE)
         self.assertIn('scanPct >= m_consoleScanPct + 25', SOURCE)
+
+    def test_console_uses_logo_palette_and_text_only_ui(self):
+        console = SOURCE[SOURCE.index('struct LogConsole {'):SOURCE.index('//  7. TrajectoryBufferSim')]
+        for required in (
+            'RGB(3, 5, 17)',
+            'RGB(11, 105, 255)',
+            'RGB(0, 216, 246)',
+            'RGB(142, 62, 255)',
+            'GEODE PREDICTIVE INPUT BUFFER',
+            'LIVE CONSOLE',
+            'LIVE FEED',
+            'SetConsoleTextAttribute',
+            'SetConsoleScreenBufferInfoEx',
+            'static void drawFrame()',
+            'static void scanProgress(float seconds, int percent)',
+            'static void event(float seconds',
+        ):
+            self.assertIn(required, console)
+        self.assertIn('if (!s_on || !s_out) return;', console)
+        self.assertNotIn('Sleep(', console)
+        self.assertNotIn('std::thread', console)
+        self.assertNotIn('SetTimer(', console)
+        self.assertIn('static std::string consoleTag', SOURCE)
+        self.assertIn('if (tag == "BUFFER") return "SAVE";', SOURCE)
+        self.assertIn('LogConsole::event(t, consoleTag(tag), text, color);', SOURCE)
 
     def test_no_input_buffer_visuals_enabled(self):
 
