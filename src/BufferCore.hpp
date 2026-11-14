@@ -290,6 +290,7 @@ public:
     }
 
     size_t size() const { return m_events.size(); }
+    bool full() const { return m_events.size() >= MAX_EVENTS; }
     double shift() const { return m_shift; }
     double nextAt() const { return m_events.empty() ? -1.0 : m_events.front().at; }
     // Direction of the next input to fire (only valid while pending()).
