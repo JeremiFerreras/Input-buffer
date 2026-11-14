@@ -48,15 +48,16 @@ class VideoProfileTests(unittest.TestCase):
     def test_console_matches_video_profile(self):
         for required in (
             "Geode Predictive Input Buffer - Live Console",
-            "[InputBuffer] v4.6 LOADED (Wave Spikes/Saws Trajectory Fix)",
-            "[InputBuffer] Starting Mode: STAGE 1 (2 All / 2 Wave)",
-            "2/2 -> 4/4 -> 8/8 -> 16/8 -> OFF",
+            ">_  GEODE PREDICTIVE INPUT BUFFER",
+            "INPUT TIMING / SIMULATION ENGINE",
+            "LIVE FEED  //  GAME-TIME EVENTS",
+            "F6  CHANGE PRESET   |   F7  HIDE CONSOLE",
+            "STAGE {}  |  ALL {}T  |  WAVE {}T",
             "SAVED +{} TICKS",
             "Frame: @ -> Delayed (@)",
             "[Limit: {}]",
         ):
             self.assertIn(required, SOURCE, f"console text missing: {required}")
-        self.assertIn("{:.1f}f / {:.1f}f @ 60fps", SOURCE)
 
     def test_live_console_is_concise(self):
         self.assertIn('static bool consoleWorthy(std::string const& tag)', SOURCE)
@@ -75,7 +76,7 @@ class VideoProfileTests(unittest.TestCase):
             'RGB(45, 145, 255)',
             'RGB(0, 216, 246)',
             'RGB(255, 207, 88),  RGB(248, 251, 255)',
-            'RGB(142, 62, 255)',
+            'RGB(183, 95, 255)',
             'RGB(255, 207, 88)',
             'static constexpr WORD A_MUTED  = FOREGROUND_INTENSITY;',
             'GEODE PREDICTIVE INPUT BUFFER',
@@ -118,8 +119,10 @@ class VideoProfileTests(unittest.TestCase):
         self.assertIn("constexpr int    SCAN_SLICE_US           = 2000", SOURCE)
         self.assertIn('getSettingValue<bool>("auto-scan")', SOURCE)
         self.assertIn("s_sim.autoScanOnPause(this)", SOURCE)
-        self.assertIn("Auto scan progress: {}%", SOURCE)
-        self.assertIn("Auto scan finished: {}", SOURCE)
+        self.assertIn('LogConsole::scanProgress(levelMs() / 1000.f, scanPct);', SOURCE)
+        self.assertIn('static void scanProgress(float seconds, int percent)', SOURCE)
+        self.assertIn('AUTO SCAN STARTED  |  RUNNING WHILE PAUSED', SOURCE)
+        self.assertIn('AUTO SCAN COMPLETE  |  {}', SOURCE)
         self.assertIn("m_autoScanComplete = pctAt(pl, m_scanX) >= 99.5f", SOURCE)
         self.assertIn("routeMerge()", SOURCE)
         # A partial scan can restart from a later pause; no m_scanState == Done guard.
