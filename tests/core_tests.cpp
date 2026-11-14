@@ -949,6 +949,46 @@ static void testOrbAim() {
 
 // pushAt (2.1): a follow-up placed on time instead of keeping the held input's
 // spacing; never before the previous input + minGap; later inputs keep its spacing.
+static void testQueueCapacity() {
+    std::printf("[queue capacity / overflow]\n");
+    for (bool explicitAt : {false, true}) {
+        InputQueue q;
+        q.start(true, 0.0, 1.0);
+        bool last = true;
+        for (size_t i = 1; i < InputQueue::MAX_EVENTS; ++i) {
+            last = !last;
+            double const now = static_cast<double>(i);
+            bool const accepted = explicitAt
+                ? q.pushAt(last, now + 0.5, now, 0.25)
+                : q.push(last, now, 0.25);
+            CHECK(accepted, "event %zu rejected before capacity (pushAt=%d)", i, explicitAt);
+        }
+
+        CHECK(q.full(), "queue did not report full (pushAt=%d)", explicitAt);
+        CHECK(q.size() == InputQueue::MAX_EVENTS, "size %zu at capacity (pushAt=%d)", q.size(), explicitAt);
+        int const droppedBefore = q.dropped();
+        bool const overflowAccepted = explicitAt
+            ? q.pushAt(!last, 100.5, 100.0, 0.25)
+            : q.push(!last, 100.0, 0.25);
+        CHECK(!overflowAccepted, "overflow event unexpectedly accepted (pushAt=%d)", explicitAt);
+        CHECK(q.dropped() == droppedBefore + 1, "overflow counter did not advance (pushAt=%d)", explicitAt);
+        CHECK(q.size() == InputQueue::MAX_EVENTS, "overflow changed queue size (pushAt=%d)", explicitAt);
+
+        std::vector<bool> fired;
+        while (q.pending()) {
+            auto event = q.poll(1e18);
+            if (!event) break;
+            fired.push_back(*event);
+        }
+        bool ordered = fired.size() == InputQueue::MAX_EVENTS;
+        for (size_t i = 0; ordered && i < fired.size(); ++i) {
+            if (fired[i] != (i % 2 == 0)) ordered = false;
+        }
+        CHECK(ordered, "accepted events were not preserved in alternating order (pushAt=%d)", explicitAt);
+        CHECK(!q.full() && !q.active(), "queue did not return to idle after drain (pushAt=%d)", explicitAt);
+    }
+}
+
 static void testPushAt() {
     std::printf("[pushAt]\n");
     InputQueue q;
@@ -974,6 +1014,7 @@ static void testPushAt() {
 }
 
 int main() {
+    testQueueCapacity();
     testPushAt();
     testSearch();
     testSearchExtras();
