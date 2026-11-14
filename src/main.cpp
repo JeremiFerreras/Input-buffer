@@ -2070,7 +2070,7 @@ struct LogConsole {
     static constexpr WORD A_RED    = FOREGROUND_RED | FOREGROUND_INTENSITY;
     static constexpr WORD A_PURPLE = FOREGROUND_RED | FOREGROUND_BLUE | FOREGROUND_INTENSITY;
     static constexpr WORD A_WHITE  = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY;
-    static constexpr WORD A_MUTED  = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE;
+    static constexpr WORD A_MUTED  = FOREGROUND_INTENSITY;
 
     static BOOL WINAPI ctrlHandler(DWORD type) {
         return (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT) ? TRUE : FALSE;
@@ -2244,6 +2244,7 @@ struct LogConsole {
     }
 
     static void scanProgress(float seconds, int percent) {
+        if (!on()) return;
         int const blocks = std::clamp(percent * 12 / 100, 0, 12);
         std::string const bar = std::string(static_cast<size_t>(blocks), '#') +
                                 std::string(static_cast<size_t>(12 - blocks), '.');
@@ -2295,6 +2296,7 @@ struct LogConsole {
         if (s_out) CloseHandle(s_out);
         s_out = nullptr;
         s_lastAttr = 0xffff;
+        SetConsoleCtrlHandler(ctrlHandler, FALSE);
         if (s_ours) {
             FreeConsole();
             s_ours = false;

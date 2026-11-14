@@ -75,6 +75,8 @@ class VideoProfileTests(unittest.TestCase):
             'RGB(11, 105, 255)',
             'RGB(0, 216, 246)',
             'RGB(142, 62, 255)',
+            'RGB(255, 207, 88)',
+            'static constexpr WORD A_MUTED  = FOREGROUND_INTENSITY;',
             'GEODE PREDICTIVE INPUT BUFFER',
             'LIVE CONSOLE',
             'LIVE FEED',
