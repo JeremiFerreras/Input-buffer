@@ -2061,10 +2061,178 @@ struct LogConsole {
     static inline bool s_ours = false; // we opened it (Geode's own console stays)
 #ifdef GEODE_IS_WINDOWS
     static inline HANDLE s_out = nullptr;
+    static inline WORD s_lastAttr = 0xffff;
+
+    struct PendingLine {
+        std::string prefix;
+        std::string label;
+        std::string body;
+        WORD labelAttr = 0;
+        WORD bodyAttr = 0;
+        bool important = false;
+    };
+    static inline std::deque<PendingLine> s_pending;
+    static inline size_t s_droppedPending = 0;
+    static constexpr size_t MAX_PENDING_LINES = 96;
+    static constexpr size_t MAX_LINES_PER_FRAME = 2;
+
+    static constexpr WORD A_BLUE   = FOREGROUND_BLUE | FOREGROUND_INTENSITY;
+    static constexpr WORD A_CYAN   = FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY;
+    static constexpr WORD A_GREEN  = FOREGROUND_GREEN | FOREGROUND_INTENSITY;
+    static constexpr WORD A_YELLOW = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY;
+    static constexpr WORD A_RED    = FOREGROUND_RED | FOREGROUND_INTENSITY;
+    static constexpr WORD A_PURPLE = FOREGROUND_RED | FOREGROUND_BLUE | FOREGROUND_INTENSITY;
+    static constexpr WORD A_WHITE  = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY;
+    static constexpr WORD A_MUTED  = FOREGROUND_INTENSITY;
+
     static BOOL WINAPI ctrlHandler(DWORD type) {
-        return (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT) ? TRUE : FALSE; // Ctrl+C doesn't kill the game
+        return (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT) ? TRUE : FALSE;
+    }
+
+    static WORD colorAttr(ccColor3B color) {
+        if (color.r > 215 && color.g < 155) return A_RED;
+        if (color.r > 215 && color.g > 175 && color.b < 165) return A_YELLOW;
+        if (color.b > 190 && color.r < 185 && color.g > 150) return A_CYAN;
+        if (color.g > 190 && color.r < 175) return A_GREEN;
+        if (color.b > 185 && color.r > 145) return A_PURPLE;
+        if (color.b > 180) return A_BLUE;
+        return A_WHITE;
+    }
+
+    static WORD tagAttr(std::string const& tag) {
+        if (tag == "DEATH") return A_RED;
+        if (tag == "WARN") return A_YELLOW;
+        if (tag == "SAVE") return A_CYAN;
+        if (tag == "FIRED" || tag == "READY") return A_GREEN;
+        if (tag == "SCAN") return A_PURPLE;
+        if (tag == "MODE" || tag == "SYSTEM") return A_BLUE;
+        return A_MUTED;
+    }
+
+    static WORD messageAttr(std::string const& tag, ccColor3B color) {
+        if (tag == "DEATH") return A_RED;
+        if (tag == "WARN") return A_YELLOW;
+        if (tag == "SAVE") return A_CYAN;
+        if (tag == "FIRED" || tag == "READY") return A_GREEN;
+        if (tag == "SCAN") return A_CYAN;
+        if (tag == "MODE" || tag == "SYSTEM") return A_WHITE;
+        return colorAttr(color);
+    }
+
+    static void raw(std::string const& text, WORD attr) {
+        if (!s_on || !s_out || text.empty()) return;
+        if (s_lastAttr != attr) {
+            SetConsoleTextAttribute(s_out, attr);
+            s_lastAttr = attr;
+        }
+        DWORD written = 0;
+        WriteConsoleA(s_out, text.data(), static_cast<DWORD>(text.size()), &written, nullptr);
+    }
+
+    // Input hooks only enqueue. Terminal I/O is drained from the UI's normal
+    // update, two lines per frame at most, so a slow terminal cannot stall a click.
+    static void enqueue(PendingLine line) {
+        if (!s_on || !s_out) return;
+        if (s_pending.size() >= MAX_PENDING_LINES) {
+            auto const expendable = std::find_if(s_pending.begin(), s_pending.end(),
+                [](PendingLine const& pending) { return !pending.important; });
+            if (expendable != s_pending.end()) {
+                s_pending.erase(expendable);
+                ++s_droppedPending;
+            } else if (line.important) {
+                s_pending.pop_front();
+                ++s_droppedPending;
+            } else {
+                ++s_droppedPending;
+                return;
+            }
+        }
+        s_pending.push_back(std::move(line));
+    }
+
+    static void pump() {
+        if (!s_on || !s_out || s_pending.empty()) return;
+        size_t count = 0;
+        while (count++ < MAX_LINES_PER_FRAME && !s_pending.empty()) {
+            PendingLine line = std::move(s_pending.front());
+            s_pending.pop_front();
+            raw(line.prefix, A_MUTED);
+            raw(line.label, line.labelAttr);
+            raw(line.body, line.bodyAttr);
+            raw("\r\n", A_MUTED);
+        }
+    }
+
+    static size_t pendingCount() { return s_pending.size(); }
+    static size_t droppedPendingCount() { return s_droppedPending; }
+
+    static void rule() {
+        raw("+" + std::string(78, '-') + "+\r\n", A_BLUE);
+    }
+
+    static void frameLine(std::string text, WORD attr) {
+        constexpr size_t WIDTH = 78;
+        if (text.size() > WIDTH) text.resize(WIDTH);
+        raw("|", A_BLUE);
+        raw(text, attr);
+        if (text.size() < WIDTH) raw(std::string(WIDTH - text.size(), ' '), A_MUTED);
+        raw("|\r\n", A_BLUE);
+    }
+
+    // One static frame at open; no redraw loop, animation timer or polling.
+    static void drawFrame() {
+        rule();
+        frameLine(">_  GEODE PREDICTIVE INPUT BUFFER                         LIVE CONSOLE", A_WHITE);
+        frameLine("    INPUT TIMING / SIMULATION ENGINE       CYAN  /  BLUE  /  VIOLET", A_CYAN);
+        rule();
+        frameLine("LIVE FEED  //  GAME-TIME EVENTS", A_PURPLE);
+        rule();
+    }
+
+    static void prepareOwnedConsole() {
+        if (!s_out || !s_ours) return;
+
+        // The custom palette is only applied to a console allocated by this mod.
+        // An existing Geode console is left untouched.
+        CONSOLE_SCREEN_BUFFER_INFOEX info{};
+        info.cbSize = sizeof(info);
+        if (GetConsoleScreenBufferInfoEx(s_out, &info)) {
+            static COLORREF const palette[16] = {
+                RGB(3, 5, 17),       RGB(10, 36, 93),    RGB(19, 92, 75),    RGB(10, 72, 88),
+                RGB(88, 24, 43),      RGB(65, 34, 95),    RGB(95, 66, 21),    RGB(140, 164, 192),
+                RGB(58, 78, 116),     RGB(45, 145, 255),  RGB(72, 255, 178),  RGB(0, 216, 246),
+                RGB(255, 100, 137),   RGB(183, 95, 255),  RGB(255, 207, 88),  RGB(248, 251, 255)
+            };
+            for (int i = 0; i < 16; ++i) info.ColorTable[i] = palette[i];
+            info.wAttributes = A_WHITE;
+            SetConsoleScreenBufferInfoEx(s_out, &info);
+        }
+
+        // Give the live feed enough room to scroll while keeping a compact window.
+        COORD const bufferSize{80, 600};
+        SetConsoleScreenBufferSize(s_out, bufferSize);
+        SMALL_RECT const window{0, 0, 79, 29};
+        SetConsoleWindowInfo(s_out, TRUE, &window);
+
+        CONSOLE_CURSOR_INFO cursor{};
+        if (GetConsoleCursorInfo(s_out, &cursor)) {
+            cursor.bVisible = FALSE;
+            SetConsoleCursorInfo(s_out, &cursor);
+        }
+
+        CONSOLE_SCREEN_BUFFER_INFO screen{};
+        if (GetConsoleScreenBufferInfo(s_out, &screen)) {
+            COORD const home{0, 0};
+            DWORD written = 0;
+            DWORD const cells = static_cast<DWORD>(screen.dwSize.X) *
+                                static_cast<DWORD>(screen.dwSize.Y);
+            FillConsoleOutputCharacterA(s_out, ' ', cells, home, &written);
+            FillConsoleOutputAttribute(s_out, A_WHITE, cells, home, &written);
+            SetConsoleCursorPosition(s_out, home);
+        }
     }
 #endif
+
     static bool available() {
 #ifdef GEODE_IS_WINDOWS
         return true;
@@ -2072,7 +2240,68 @@ struct LogConsole {
         return false;
 #endif
     }
+
     static bool on() { return s_on; }
+
+    static void event(float seconds, std::string const& tag, std::string const& text, ccColor3B color) {
+#ifdef GEODE_IS_WINDOWS
+        if (!s_on || !s_out) return;
+        int const total = std::max(0, static_cast<int>(seconds));
+        int const minutes = total / 60;
+        int const secs = total % 60;
+        std::string const prefix = fmt::format("[{:02}:{:02}] ", minutes, secs);
+        std::string const label = fmt::format("[{:<6}] ", tag);
+        WORD const bodyAttr = messageAttr(tag, color);
+        constexpr size_t WIDTH = 78;
+        bool const important = tag == "WARN" || tag == "DEATH";
+
+        std::string remaining = text;
+        bool first = true;
+        do {
+            std::string const continuationIndent(prefix.size() + label.size(), ' ');
+            size_t const indentSize = first ? prefix.size() + label.size() : continuationIndent.size();
+            size_t const available = WIDTH > indentSize ? WIDTH - indentSize : 1;
+            size_t count = std::min(remaining.size(), available);
+            if (count < remaining.size()) {
+                size_t const space = remaining.rfind(' ', count);
+                if (space != std::string::npos && space > 0) count = space;
+            }
+            PendingLine line;
+            line.prefix = first ? prefix : continuationIndent;
+            line.label = first ? label : std::string();
+            line.body = remaining.substr(0, count);
+            line.labelAttr = first ? tagAttr(tag) : A_MUTED;
+            line.bodyAttr = bodyAttr;
+            line.important = important;
+            enqueue(std::move(line));
+            if (count >= remaining.size()) break;
+            size_t next = count;
+            while (next < remaining.size() && remaining[next] == ' ') ++next;
+            remaining.erase(0, next);
+            first = false;
+        } while (!remaining.empty());
+#else
+        (void)seconds; (void)tag; (void)text; (void)color;
+#endif
+    }
+
+    static void preset(float seconds, int stage, int allTicks, int waveTicks) {
+        if (stage == 0) {
+            event(seconds, "MODE", "INPUT BUFFER OFF  |  100% RAW INPUT", COL_GREY);
+        } else {
+            event(seconds, "MODE", fmt::format("STAGE {}  |  ALL {}T  |  WAVE {}T", stage, allTicks, waveTicks),
+                  COL_CYAN);
+        }
+    }
+
+    static void scanProgress(float seconds, int percent) {
+        if (!on()) return;
+        int const blocks = std::clamp(percent * 12 / 100, 0, 12);
+        std::string const bar = std::string(static_cast<size_t>(blocks), '#') +
+                                std::string(static_cast<size_t>(12 - blocks), '.');
+        event(seconds, "SCAN", fmt::format("[{}] {}%", bar, percent), COL_CYAN);
+    }
+
     static bool open() {
 #ifdef GEODE_IS_WINDOWS
         if (s_on) return true;
@@ -2083,6 +2312,11 @@ struct LogConsole {
         s_out = CreateFileA("CONOUT$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                             OPEN_EXISTING, 0, nullptr);
         if (s_out == INVALID_HANDLE_VALUE) s_out = nullptr;
+        if (!s_out) {
+            if (s_ours) FreeConsole();
+            s_ours = false;
+            return false;
+        }
         SetConsoleTitleA("Geode Predictive Input Buffer - Live Console");
         SetConsoleOutputCP(CP_UTF8);
         SetConsoleCtrlHandler(ctrlHandler, TRUE);
@@ -2090,53 +2324,38 @@ struct LogConsole {
             if (HMENU m = GetSystemMenu(w, FALSE)) DeleteMenu(m, SC_CLOSE, MF_BYCOMMAND);
         }
         s_on = true;
-        write("[InputBuffer] v4.6 LOADED (Wave Spikes/Saws Trajectory Fix)", {255, 255, 255});
+        s_lastAttr = 0xffff;
+        prepareOwnedConsole();
+        drawFrame();
+
+        event(0.f, "SYSTEM", "MOD INITIALIZED  |  PREDICTIVE INPUT ENGINE", COL_CYAN);
         int const stage = stageFromSetting(Mod::get()->getSettingValue<std::string>("stage"));
-        if (stage == 0) {
-            write("[InputBuffer] Starting Mode: OFF (100% Raw Input)", {255, 255, 255});
-        } else {
-            int const all = static_cast<int>(std::lround(STAGES[stage].w[W_CUBE] / BASE_DT));
-            int const wave = static_cast<int>(std::lround(STAGES[stage].w[W_WAVE] / BASE_DT));
-            if (stage == 1) {
-                write("[InputBuffer] Starting Mode: STAGE 1 (2 All / 2 Wave)", {255, 255, 255});
-            } else {
-                write(fmt::format("[InputBuffer] Starting Mode: STAGE {} ({} All / {} Wave)", stage, all, wave), {255, 255, 255});
-            }
-        }
-        write("[InputBuffer] Press F6 in-level to cycle: 2/2 -> 4/4 -> 8/8 -> 16/8 -> OFF", {255, 255, 255});
+        int const all = stage == 0 ? 0 : static_cast<int>(std::lround(STAGES[stage].w[W_CUBE] / BASE_DT));
+        int const wave = stage == 0 ? 0 : static_cast<int>(std::lround(STAGES[stage].w[W_WAVE] / BASE_DT));
+        preset(0.f, stage, all, wave);
+        event(0.f, "READY", "F6  CHANGE PRESET   |   F7  HIDE CONSOLE", COL_GREEN);
         return true;
 #else
         return false;
 #endif
     }
+
     static void close() {
 #ifdef GEODE_IS_WINDOWS
         if (!s_on) return;
         s_on = false;
+        s_pending.clear();
+        s_droppedPending = 0;
         if (s_out) CloseHandle(s_out);
         s_out = nullptr;
+        s_lastAttr = 0xffff;
+        SetConsoleCtrlHandler(ctrlHandler, FALSE);
         if (s_ours) {
             FreeConsole();
             s_ours = false;
         } else if (HWND w = GetConsoleWindow()) {
-            GetSystemMenu(w, TRUE); // Geode's console: give its close button back
+            GetSystemMenu(w, TRUE);
         }
-#endif
-    }
-    static void write(std::string const& line, ccColor3B col) {
-#ifdef GEODE_IS_WINDOWS
-        if (!s_on || !s_out) return;
-        // Video-style console: consistent light text on a black terminal.
-        (void)col;
-        WORD attr = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY;
-        SetConsoleTextAttribute(s_out, attr);
-        std::string const text = line + "\n";
-        DWORD n = 0;
-        WriteConsoleA(s_out, text.data(), static_cast<DWORD>(text.size()), &n, nullptr);
-        SetConsoleTextAttribute(s_out, FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE);
-#else
-        (void)line;
-        (void)col;
 #endif
     }
 };
@@ -2342,6 +2561,7 @@ class TrajectoryBufferSim {
     Clock::time_point m_lastStepWall{};      // last physics-step hook call (wall clock)
     Clock::time_point m_pendingSinceWall{};  // when the current held input started waiting
     long long m_watchdogFires = 0;
+    bool m_queueOverflowReported = false; // one warning per level
     long long m_simStepsTotal = 0;   // sim steps run (for us-per-step in Stats)
     long long m_cheapClicks = 0;     // clicks finished with cheap checks (out of time)
     long long m_inputsSeen = 0;      // inputs that reached the buffer this level
@@ -2695,10 +2915,8 @@ public:
     // ------------------------------------------------------------------------
     static constexpr size_t MAX_TRACE = 2000;
     void trace(std::string line) {
-        // console + "Log: more detail": every click's decision too (log lines are shown already)
-        if (LogConsole::on() && line.rfind("log ", 0) != 0 && cfg().hudVerbose) {
-            LogConsole::write(fmt::format("{:8.2f}s  {}", levelMs() / 1000.f, line), ccColor3B{150, 150, 170});
-        }
+        // Detailed traces stay in the in-game Dev tab / exported report.
+        // The live console is intentionally reserved for important notices.
         m_trace.push_back(fmt::format("{:9.3f} {}", levelMs() / 1000.f, line));
         while (m_trace.size() > MAX_TRACE) m_trace.pop_front();
     }
@@ -3379,9 +3597,9 @@ public:
         // preserves the useful part of the earlier partial scan.
         startScan(pl);
         if (scanning()) {
-            LogConsole::write("[InputBuffer] Auto scan started (small CPU slices while paused).", {255, 255, 255});
+            LogConsole::event(levelMs() / 1000.f, "SCAN", "AUTO SCAN STARTED  |  RUNNING WHILE PAUSED", COL_CYAN);
         } else if (!m_scanMsg.empty()) {
-            LogConsole::write(fmt::format("[InputBuffer] Auto scan skipped: {}", m_scanMsg), {255, 255, 255});
+            LogConsole::event(levelMs() / 1000.f, "WARN", fmt::format("AUTO SCAN SKIPPED  |  {}", m_scanMsg), COL_YELLOW);
         }
     }
 
@@ -3480,7 +3698,7 @@ public:
         m_scanMsg = std::move(msg);
         m_scanState = ScanState::Done;
         m_autoScanComplete = pctAt(pl, m_scanX) >= 99.5f;
-        LogConsole::write(fmt::format("[InputBuffer] Auto scan finished: {}", m_scanMsg), {255, 255, 255});
+        LogConsole::event(levelMs() / 1000.f, "SCAN", fmt::format("AUTO SCAN COMPLETE  |  {}", m_scanMsg), COL_GREEN);
         trace(fmt::format("scan: {} (gamemode portals passed in tests: {})", m_scanMsg, m_scanModeSwitches));
         // short: the full message is on the Tools tab
         // No in-game notification in the video profile; report only to the console.
@@ -3498,10 +3716,10 @@ public:
             finishScan(pl, fmt::format("stopped at {:.0f}% - stay paused while it scans", pctAt(pl, m_scanX)), &m_beam);
             return;
         }
-        int const scanPct = static_cast<int>(std::floor(std::clamp(pctAt(pl, m_scanX), 0.f, 100.f) / 10.f)) * 10;
-        if (scanPct >= m_consoleScanPct + 10 && scanPct < 100) {
+        int const scanPct = static_cast<int>(std::floor(std::clamp(pctAt(pl, m_scanX), 0.f, 100.f) / 25.f)) * 25;
+        if (scanPct >= m_consoleScanPct + 25 && scanPct < 100) {
             m_consoleScanPct = scanPct;
-            LogConsole::write(fmt::format("[InputBuffer] Auto scan progress: {}%", scanPct), {255, 255, 255});
+            LogConsole::scanProgress(levelMs() / 1000.f, scanPct);
         }
         auto const t0 = Clock::now();
         if (m_realScan) {
@@ -5232,11 +5450,23 @@ private:
         pushTagged(std::move(tag), std::move(text), color, minor);
     }
 
+    static bool consoleWorthy(std::string const& tag) {
+        return tag == "NOTE" || tag == "DEATH" || tag == "BUFFER" || tag == "FIRED";
+    }
+
+    static std::string consoleTag(std::string const& tag) {
+        if (tag == "BUFFER") return "SAVE";
+        if (tag == "NOTE") return "WARN";
+        return tag;
+    }
+
     void pushTagged(std::string tag, std::string text, ccColor3B color, bool minor = false) {
         trace(fmt::format("log {} {}", tag, text));
         m_logVersion++;
         float const t = levelMs() / 1000.f;
-        if (LogConsole::on()) LogConsole::write(fmt::format("[InputBuffer] {}", text), {255, 255, 255});
+        if (LogConsole::on() && consoleWorthy(tag)) {
+            LogConsole::event(t, consoleTag(tag), text, color);
+        }
         if (!m_history.empty() && m_history.back().text == text && m_history.back().tag == tag) {
             m_history.back().repeat++;
             m_history.back().t = t;
@@ -5420,6 +5650,7 @@ public:
         m_horizonScale = 1.0f;
         m_hasDeadline = false;
         m_stats = Stats{};
+        m_queueOverflowReported = false;
         m_planFires = m_planDrifts = m_planTicksSaved = 0;
         m_planTrust = false;
         m_liveUsSum = m_liveChecks = m_liveUsMax = 0;
@@ -6294,21 +6525,9 @@ public:
         refreshFlags();
         clearBuffer();
         if (notify && LogConsole::on()) {
-            if (stage == 0) {
-                LogConsole::write("[InputBuffer] F6 Cycle -> STAGE 5: OFF (100% Raw Input)", {255, 255, 255});
-            } else {
-                int const all = static_cast<int>(std::lround(STAGES[stage].w[W_CUBE] / BASE_DT));
-                int const wave = static_cast<int>(std::lround(STAGES[stage].w[W_WAVE] / BASE_DT));
-                float const allF = STAGES[stage].w[W_CUBE];
-                float const waveF = STAGES[stage].w[W_WAVE];
-                if (std::fabs(allF - waveF) < 0.001f) {
-                    LogConsole::write(fmt::format("[InputBuffer] F6 Cycle -> STAGE {}: {} Ticks All | {} Ticks Wave ({:.1f}f @ 60fps)",
-                                                   stage, all, wave, allF), {255, 255, 255});
-                } else {
-                    LogConsole::write(fmt::format("[InputBuffer] F6 Cycle -> STAGE {}: {} Tick{} All | {} Tick{} Wave ({:.1f}f / {:.1f}f @ 60fps)",
-                                                   stage, all, all == 1 ? "" : "s", wave, wave == 1 ? "" : "s", allF, waveF), {255, 255, 255});
-                }
-            }
+            int const all = stage == 0 ? 0 : static_cast<int>(std::lround(STAGES[stage].w[W_CUBE] / BASE_DT));
+            int const wave = stage == 0 ? 0 : static_cast<int>(std::lround(STAGES[stage].w[W_WAVE] / BASE_DT));
+            LogConsole::preset(levelMs() / 1000.f, stage, all, wave);
         }
         log::info("[InputBuffer] {}", STAGES[stage].name);
         refreshHud(PlayLayer::get(), true);
@@ -6439,11 +6658,29 @@ public:
         for (size_t i = from; i < m_trace.size(); i++) out += m_trace[i] + "\n";
         return out;
     }
-    // Console just opened: what's in the Log so far, oldest first.
+    // Console just opened: show only the latest important notices, not the full click log.
     void dumpLogToConsole() {
-        for (auto const& h : m_history) {
-            std::string const rep = h.repeat > 1 ? fmt::format(" (x{})", h.repeat) : std::string();
-            LogConsole::write(fmt::format("{:8.2f}s  {:<6}  {}{}", h.t, h.tag, h.text, rep), logTagColor(h.tag));
+        constexpr size_t MAX_CONSOLE_HISTORY = 12;
+        std::vector<HistEntry const*> recent;
+        recent.reserve(MAX_CONSOLE_HISTORY);
+        for (auto it = m_history.rbegin(); it != m_history.rend() && recent.size() < MAX_CONSOLE_HISTORY; ++it) {
+            if (!consoleWorthy(it->tag)) continue;
+            recent.push_back(&*it);
+        }
+        std::reverse(recent.begin(), recent.end());
+
+        if (recent.empty()) {
+            LogConsole::event(0.f, "READY", "NO IMPORTANT EVENTS THIS SESSION", COL_GREEN);
+            return;
+        }
+        size_t importantCount = 0;
+        for (auto const& h : m_history) if (consoleWorthy(h.tag)) importantCount++;
+        if (importantCount > recent.size()) {
+            LogConsole::event(0.f, "INFO", "SHOWING THE LATEST 12 IMPORTANT EVENTS", COL_CYAN);
+        }
+        for (auto const* h : recent) {
+            std::string const rep = h->repeat > 1 ? fmt::format(" (x{})", h->repeat) : std::string();
+            LogConsole::event(h->t, consoleTag(h->tag), h->text + rep, logTagColor(h->tag));
         }
     }
     // Latest Log line (for the in-game pill).
@@ -7118,6 +7355,20 @@ public:
         };
         // 1. An input is already held back: queue this one behind it so taps are never eaten.
         if (m_queue.active()) {
+            // Never swallow a physical transition when the bounded queue is full.
+            // Drain the accepted events in order, then let this event reach GD raw.
+            if (m_queue.full()) {
+                if (!m_queueOverflowReported) {
+                    m_queueOverflowReported = true;
+                    pushLog("NOTE: input queue reached its 32-event limit; pending inputs were flushed in order and this input was passed through.",
+                            COL_ORANGE, false);
+                }
+                flushQueue(pl);
+                clearBuffer();
+                m_gameHolding = push;
+                rememberInput(pl, push);
+                return true;
+            }
             // Keep order and spacing: replay it after the held input with the same shift.
             // Wave / ship (2.1): on time instead, when that's the safe one.
             double const minGap = static_cast<double>(dt) * 0.999;
@@ -10048,6 +10299,10 @@ protected:
     }
 
     void update(float dt) override {
+        // Drain at most two queued terminal lines per frame. This keeps blocking
+        // console I/O out of the input hook and bounds the cost while playing.
+        LogConsole::pump();
+
         // background stars and the runners, only while the full window shows
         if (isVisible() && !m_compactNow) stepRunners(dt);
         if (m_stars && isVisible() && !m_compactNow) {

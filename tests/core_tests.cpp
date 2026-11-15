@@ -949,6 +949,187 @@ static void testOrbAim() {
 
 // pushAt (2.1): a follow-up placed on time instead of keeping the held input's
 // spacing; never before the previous input + minGap; later inputs keep its spacing.
+static void testQueueCapacity() {
+    std::printf("[queue capacity / overflow]\n");
+    for (bool explicitAt : {false, true}) {
+        InputQueue q;
+        q.start(true, 0.0, 1.0);
+        bool last = true;
+        for (size_t i = 1; i < InputQueue::MAX_EVENTS; ++i) {
+            last = !last;
+            double const now = static_cast<double>(i);
+            bool const accepted = explicitAt
+                ? q.pushAt(last, now + 0.5, now, 0.25)
+                : q.push(last, now, 0.25);
+            CHECK(accepted, "event %zu rejected before capacity (pushAt=%d)", i, explicitAt);
+        }
+
+        CHECK(q.full(), "queue did not report full (pushAt=%d)", explicitAt);
+        CHECK(q.size() == InputQueue::MAX_EVENTS, "size %zu at capacity (pushAt=%d)", q.size(), explicitAt);
+        int const droppedBefore = q.dropped();
+        bool const overflowAccepted = explicitAt
+            ? q.pushAt(!last, 100.5, 100.0, 0.25)
+            : q.push(!last, 100.0, 0.25);
+        CHECK(!overflowAccepted, "overflow event unexpectedly accepted (pushAt=%d)", explicitAt);
+        CHECK(q.dropped() == droppedBefore + 1, "overflow counter did not advance (pushAt=%d)", explicitAt);
+        CHECK(q.size() == InputQueue::MAX_EVENTS, "overflow changed queue size (pushAt=%d)", explicitAt);
+
+        std::vector<bool> fired;
+        while (q.pending()) {
+            auto event = q.poll(1e18);
+            if (!event) break;
+            fired.push_back(*event);
+        }
+        bool ordered = fired.size() == InputQueue::MAX_EVENTS;
+        for (size_t i = 0; ordered && i < fired.size(); ++i) {
+            if (fired[i] != (i % 2 == 0)) ordered = false;
+        }
+        CHECK(ordered, "accepted events were not preserved in alternating order (pushAt=%d)", explicitAt);
+        CHECK(!q.full() && !q.active(), "queue did not return to idle after drain (pushAt=%d)", explicitAt);
+    }
+}
+
+static uint32_t stressRandom(uint32_t& state) {
+    state ^= state << 13;
+    state ^= state >> 17;
+    state ^= state << 5;
+    return state;
+}
+
+static void testQueueStress() {
+    std::printf("[queue deterministic stress: 5,000 bursts]\n");
+    uint32_t rng = 0x6A09E667u;
+    for (int run = 0; run < 5000; ++run) {
+        struct ExpectedEvent { bool push; double at; };
+        InputQueue q;
+        bool const first = (stressRandom(rng) & 1u) != 0;
+        double now = static_cast<double>(run) * 100.0;
+        double const initialDelay = static_cast<double>(stressRandom(rng) % 501u) / 100.0;
+        q.start(first, now, initialDelay);
+
+        std::vector<ExpectedEvent> expected;
+        expected.push_back(ExpectedEvent{first, now + initialDelay});
+        double shift = initialDelay;
+        double lastAt = now + initialDelay;
+        bool lastPush = first;
+
+        for (size_t i = 1; i < InputQueue::MAX_EVENTS; ++i) {
+            now += static_cast<double>(stressRandom(rng) % 100u) / 100.0;
+            double const minGap = 0.02 + static_cast<double>(stressRandom(rng) % 40u) / 100.0;
+            bool const next = !lastPush;
+            double at = 0.0;
+            bool accepted = false;
+            if ((stressRandom(rng) & 1u) != 0) {
+                int const offset = static_cast<int>(stressRandom(rng) % 801u) - 200;
+                double const requestedAt = now + static_cast<double>(offset) / 100.0;
+                at = std::max(requestedAt, lastAt + minGap);
+                accepted = q.pushAt(next, requestedAt, now, minGap);
+                if (accepted) shift = std::max(0.0, at - now);
+            } else {
+                at = std::max(now + shift, lastAt + minGap);
+                accepted = q.push(next, now, minGap);
+            }
+
+            CHECK(accepted, "stress event rejected early: run=%d event=%zu", run, i);
+            if (!accepted) continue;
+            expected.push_back(ExpectedEvent{next, at});
+            lastAt = at;
+            lastPush = next;
+            CHECK(q.size() == expected.size(), "size mismatch: run=%d event=%zu", run, i);
+            CHECK(q.lastPush() == lastPush, "last direction mismatch: run=%d event=%zu", run, i);
+            CHECK(std::fabs(q.lastAt() - lastAt) < 1e-8, "last time mismatch: run=%d event=%zu", run, i);
+            CHECK(std::fabs(q.nextAt() - expected.front().at) < 1e-8, "head time mismatch: run=%d event=%zu", run, i);
+        }
+
+        CHECK(q.full(), "queue did not reach capacity in run=%d (size=%zu)", run, q.size());
+        int const droppedBefore = q.dropped();
+        double const overflowNow = now + 1.0;
+        bool const overflowDirection = !lastPush;
+        bool overflowAccepted = false;
+        if ((stressRandom(rng) & 1u) != 0) {
+            overflowAccepted = q.pushAt(overflowDirection, overflowNow + 0.5, overflowNow, 0.1);
+        } else {
+            overflowAccepted = q.push(overflowDirection, overflowNow, 0.1);
+        }
+        CHECK(!overflowAccepted, "overflow accepted: run=%d", run);
+        CHECK(q.dropped() == droppedBefore + 1, "overflow counter mismatch: run=%d", run);
+        CHECK(!q.push(lastPush, overflowNow, 0.1), "duplicate state accepted while full: run=%d", run);
+        CHECK(q.dropped() == droppedBefore + 1, "duplicate changed overflow counter: run=%d", run);
+
+        double delta = static_cast<double>(static_cast<int>(stressRandom(rng) % 801u) - 400) / 100.0;
+        double const notBefore = expected.front().at +
+            static_cast<double>(static_cast<int>(stressRandom(rng) % 501u) - 250) / 100.0;
+        if (expected.front().at + delta < notBefore) delta = notBefore - expected.front().at;
+        q.shiftAll(delta, notBefore);
+        for (auto& e : expected) e.at += delta;
+        lastAt += delta;
+        CHECK(std::fabs(q.lastAt() - lastAt) < 1e-8, "shiftAll last time mismatch: run=%d", run);
+        CHECK(std::fabs(q.nextAt() - expected.front().at) < 1e-8, "shiftAll head time mismatch: run=%d", run);
+
+        for (size_t i = 0; i < expected.size(); ++i) {
+            auto const early = q.poll(expected[i].at - 0.001);
+            CHECK(!early.has_value(), "event fired early: run=%d event=%zu", run, i);
+            auto const fired = q.poll(expected[i].at);
+            CHECK(fired.has_value(), "event missing: run=%d event=%zu", run, i);
+            if (fired) CHECK(*fired == expected[i].push, "event order/direction mismatch: run=%d event=%zu", run, i);
+            if (i + 1 < expected.size()) {
+                CHECK(std::fabs(q.nextAt() - expected[i + 1].at) < 1e-8,
+                      "next event time mismatch: run=%d event=%zu", run, i);
+            }
+        }
+        CHECK(!q.pending() && !q.active() && !q.full() && q.size() == 0,
+              "queue failed to return to idle: run=%d", run);
+        q.start(first, now, 0.0);
+        CHECK(q.dropped() == 0, "start did not reset dropped count: run=%d", run);
+        q.clear();
+        CHECK(!q.active() && !q.pending(), "clear did not reset queue: run=%d", run);
+    }
+}
+
+static void testSearchStress() {
+    std::printf("[delay search deterministic stress: 10,000 windows]\n");
+    uint32_t rng = 0xBB67AE85u;
+    for (int run = 0; run < 10000; ++run) {
+        int const maxDelay = 1 + static_cast<int>(stressRandom(rng) % 256u);
+        int const minDelay = 1 + static_cast<int>(stressRandom(rng) % static_cast<uint32_t>(maxDelay));
+        int const safeStart = minDelay + static_cast<int>(
+            stressRandom(rng) % static_cast<uint32_t>(maxDelay - minDelay + 1));
+
+        SearchParams params;
+        params.maxDelay = maxDelay;
+        params.minDelay = minDelay;
+        params.stride = 1 + static_cast<int>(stressRandom(rng) % 23u);
+        params.dense = static_cast<int>(stressRandom(rng) % 32u);
+        params.guard = (stressRandom(rng) & 1u) != 0;
+
+        std::vector<int> calls(static_cast<size_t>(maxDelay + 3), 0);
+        int invalidCalls = 0;
+        auto eval = [&](int delay) -> Verdict {
+            if (delay < 1 || delay > maxDelay + 2) {
+                invalidCalls++;
+                return Verdict::Bad;
+            }
+            calls[static_cast<size_t>(delay)]++;
+            return delay >= safeStart && delay <= maxDelay ? Verdict::Good : Verdict::Bad;
+        };
+
+        SearchResult const result = searchDelay(params, eval);
+        int totalCalls = 0;
+        for (int count : calls) {
+            totalCalls += count;
+            CHECK(count <= 1, "delay evaluated more than once: run=%d", run);
+        }
+        CHECK(invalidCalls == 0, "search evaluated out of bounds: run=%d", run);
+        CHECK(result.full, "monotonic safe window not found: run=%d max=%d min=%d safe=%d",
+              run, maxDelay, minDelay, safeStart);
+        CHECK(result.earliest == safeStart, "wrong earliest delay: run=%d got=%d expected=%d",
+              run, result.earliest, safeStart);
+        CHECK(result.delay == safeStart, "wrong chosen delay: run=%d got=%d expected=%d",
+              run, result.delay, safeStart);
+        CHECK(result.evals == totalCalls, "eval counter mismatch: run=%d", run);
+    }
+}
+
 static void testPushAt() {
     std::printf("[pushAt]\n");
     InputQueue q;
@@ -974,6 +1155,9 @@ static void testPushAt() {
 }
 
 int main() {
+    testQueueCapacity();
+    testQueueStress();
+    testSearchStress();
     testPushAt();
     testSearch();
     testSearchExtras();
