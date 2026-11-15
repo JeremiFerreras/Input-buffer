@@ -30,10 +30,17 @@ jobs:
           g++ -std=c++20 -O2 -Wall -Wextra -I src tests/micro_cancel_sim.cpp -o micro_cancel_sim
           ./micro_cancel_sim
 
+      - name: Compile and run Phase 1 adversarial stress tests
+        run: |
+          g++ -std=c++20 -O2 -Wall -Wextra -I src tests/stress_phase1.cpp -o stress_phase1
+          ./stress_phase1
+
       - name: Run stress tests with AddressSanitizer and UndefinedBehaviorSanitizer
         run: |
           g++ -std=c++20 -O1 -g -Wall -Wextra -D_GLIBCXX_ASSERTIONS -fno-omit-frame-pointer -fsanitize=address,undefined -I src tests/core_tests.cpp -o core_tests_sanitized
           ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 ./core_tests_sanitized
+          g++ -std=c++20 -O1 -g -Wall -Wextra -D_GLIBCXX_ASSERTIONS -fno-omit-frame-pointer -fsanitize=address,undefined -I src tests/stress_phase1.cpp -o stress_phase1_sanitized
+          ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 ./stress_phase1_sanitized
 
       - name: Verify video profile and overflow fallback
         run: python3 tests/verify_video_profile.py
