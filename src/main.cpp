@@ -1831,8 +1831,11 @@ struct SimResult {
 };
 // Extra inputs injected into a test at fixed steps (-1 = none).
 struct FollowUp {
-    int  at[2]   = {-1, -1};
-    bool held[2] = {false, false};
+    // Two slots cover the existing buffer's press/release and release/press
+    // probes. The third slot lets micro-cancel model the player's complete
+    // next tap without generating any real input.
+    int  at[3]   = {-1, -1, -1};
+    bool held[3] = {false, false, false};
 };
 
 // Per sim player: where it started and how it moves, so objects can be judged
@@ -5162,9 +5165,12 @@ private:
                     setHeld(s1, s2, push);
                 }
             }
-            // Optional follow-up inputs (used to ask "could the player still save this?").
-            if (i == follow.at[0]) setHeld(s1, s2, follow.held[0]);
-            if (i == follow.at[1]) setHeld(s1, s2, follow.held[1]);
+            // Optional follow-up inputs (used only inside the hidden simulator).
+            // Unused slots remain -1, so existing input-buffer probes are unchanged.
+            for (int followIndex = 0; followIndex < 3; ++followIndex) {
+                if (i == follow.at[followIndex])
+                    setHeld(s1, s2, follow.held[followIndex]);
+            }
 
             s1->update(dt);
             s1->updateRotation(dt);
@@ -7313,6 +7319,25 @@ public:
             m_microCancelReleaseTicks = 0;
         }
         if (!push && m_microCancelLatch.consumePhysicalRelease()) {
+            // The automatic key-up happened before the player physically let
+            // go. Preserve the player's real tap/gap calibration by recording
+            // the physical key-up here, not at the synthetic release time.
+            PlayerObject* releasePlayer = pl ? pl->m_player1 : nullptr;
+            if (releasePlayer) {
+                ModeInfo releaseMode;
+                releaseMode.add(releasePlayer);
+                WinIdx const releaseWindow = primaryWin(releaseMode, true);
+                if (m_lastPressAt >= 0.0) {
+                    double const hold = m_gameTime - m_lastPressAt;
+                    if (hold > 0.0 && hold < 60.0)
+                        m_holdLen[releaseWindow].add(static_cast<float>(hold));
+                }
+                if (releaseMode.wave) m_streamLast = m_gameTime;
+            }
+            m_lastPressAt = -1.0;
+            m_lastReleaseAt = m_gameTime;
+            m_lastInputTime = m_gameTime;
+            m_streak = 0;
             m_physicalHolding = false;
             m_inputsSeen++;
             m_microCancelModeCode = -1;
@@ -7680,11 +7705,12 @@ public:
             (m_gameTime - m_lastReleaseAt) <= STREAM_GAP_FRAMES;
         float const microStraightTolerance = std::max(0.04f, m_p1Speed * 0.025f);
         bool const microStraightShipCandidate = mode.ship && !mode.wave &&
-            m_p1StraightSamples >= 8 && m_p1Speed > 0.5f &&
+            m_p1StraightSamples >= 4 && m_p1Speed > 0.5f &&
             std::fabs(m_p1VerticalSpeed) <= microStraightTolerance;
         bool const microCancelSpamOverride = m_microCancelLevel > 0 && m_enabled && push &&
             !isDual && !isTwoPlayerControl && p2 == nullptr &&
             !m_queue.active() && !m_gameHolding &&
+            !m_microCancelLatch.pending() && !m_microCancelLatch.released() &&
             (microWaveSpamCandidate || microStraightShipCandidate);
 
         // 3. Streak-based spam guard (real-time interval, off in Extreme).
@@ -7933,8 +7959,9 @@ public:
         }
 
         // 8d. Experimental micro-cancel: only for a deadly no-fix press.
-        // One release is simulated at +1..+3 base ticks using the hidden GD
-        // PlayerObject. Partial/unknown paths, movers, orbs and timeouts fail closed.
+        // The hidden GD player tests a single early release followed by the
+        // player's learned natural tap cycle. It never creates that real input.
+        // Unknown geometry, movers, orbs and budget exhaustion still fail closed.
         int microCancelTicks = 0;
         int microProbeUs = 0;
         ibcore::MicroCancelGate microGate;
@@ -7952,6 +7979,15 @@ public:
         microGate.baselineBudget = discard || r0.end == SimEnd::OutOfBudget || budgetHit;
         microGate.maxTicks = m_microCancelLevel;
 
+        WinIdx const microRhythmWindow = primaryWin(mode, true);
+        float const microTapFrames = rhythm(m_holdLen[microRhythmWindow], DEFAULT_TAP_FRAMES);
+        float const microGapFrames = rhythm(m_gapLen[microRhythmWindow], DEFAULT_GAP_FRAMES);
+        int const microTapTicks = std::max(1, static_cast<int>(std::lround(microTapFrames / dt)));
+        int const microNaturalCycleTicks = std::max(1,
+            static_cast<int>(std::lround((microTapFrames + microGapFrames) / dt)));
+        int const microTimingJitter = std::max(1, scaleTicks(2, s));
+        int const microPostRecoveryTicks = scaleTicks(4, s);
+
         long long const microElapsed = std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - t0).count();
         int const clickBudgetRemaining = budgetUs > 0
             ? std::max(0, budgetUs - static_cast<int>(std::min<long long>(microElapsed, 1000000)))
@@ -7968,23 +8004,52 @@ public:
             m_deadline = microStart + std::chrono::microseconds(microBudgetUs);
             auto const plan = ibcore::planMicroCancel(microGate, [&](int baseTicks) {
                 int const releaseStep = scaleTicks(baseTicks, s);
-                // Check a short, bounded recovery window after the one-shot
-                // release. It proves the player has time to provide their NEXT
-                // manual press; this code does not generate that press.
-                int const recoveryTicks = scaleTicks(3, s);
-                int const recoveryHorizon = releaseStep + recoveryTicks;
-                if (recoveryHorizon > x.horizon) return ibcore::Verdict::Bad;
-                FollowUp oneShot;
-                oneShot.at[0] = releaseStep;
-                oneShot.held[0] = false;
-                SimResult const candidate = sim(0, oneShot, recoveryHorizon);
-                if (candidate.end == SimEnd::OutOfBudget) return ibcore::Verdict::Budget;
-                if (candidate.end == SimEnd::Truncated || candidate.trunc.valid ||
-                    candidate.mover || candidate.orbUsed) return ibcore::Verdict::Partial;
-                if (candidate.end != SimEnd::Survived || candidate.ticks < recoveryHorizon)
+                // The player must still be physically holding the original tap
+                // when the synthetic release is due. If their normal key-up
+                // comes first, the latch cancels the intervention.
+                if (releaseStep >= microTapTicks) return ibcore::Verdict::Bad;
+
+                int const minRepress = releaseStep + scaleTicks(2, s);
+                if (microNaturalCycleTicks - microTimingJitter < minRepress)
                     return ibcore::Verdict::Bad;
-                if (candidate.clear < clearTarget(mode.name()) + 0.75f) return ibcore::Verdict::Bad;
-                return ibcore::Verdict::Good;
+                int const earlyRepress = microNaturalCycleTicks - microTimingJitter;
+                int const nominalRepress = microNaturalCycleTicks;
+                int const lateRepress = microNaturalCycleTicks + microTimingJitter;
+                int const recoveryHorizon = lateRepress + microTapTicks + microPostRecoveryTicks;
+                if (recoveryHorizon > x.horizon) return ibcore::Verdict::Bad;
+
+                ibcore::MicroCancelRecoveryWindow recovery;
+                auto checkManualTap = [&](int repressAt, bool& safe) -> ibcore::Verdict {
+                    FollowUp oneShot;
+                    oneShot.at[0] = releaseStep;
+                    oneShot.held[0] = false;                  // one automatic release
+                    oneShot.at[1] = repressAt;
+                    oneShot.held[1] = true;                   // predicted human re-press
+                    oneShot.at[2] = repressAt + microTapTicks;
+                    oneShot.held[2] = false;                  // predicted human key-up
+                    SimResult const candidate = sim(0, oneShot, recoveryHorizon);
+                    if (candidate.end == SimEnd::OutOfBudget) return ibcore::Verdict::Budget;
+                    if (candidate.end == SimEnd::Truncated || candidate.trunc.valid ||
+                        candidate.mover || candidate.orbUsed) return ibcore::Verdict::Partial;
+                    safe = candidate.end == SimEnd::Survived &&
+                           candidate.ticks >= recoveryHorizon &&
+                           candidate.clear >= clearTarget(mode.name()) + 0.75f;
+                    return safe ? ibcore::Verdict::Good : ibcore::Verdict::Bad;
+                };
+
+                ibcore::Verdict const earlyResult = checkManualTap(earlyRepress, recovery.earlySafe);
+                if (earlyResult == ibcore::Verdict::Partial || earlyResult == ibcore::Verdict::Budget)
+                    return earlyResult;
+                ibcore::Verdict const nominalResult = checkManualTap(nominalRepress, recovery.nominalSafe);
+                if (nominalResult == ibcore::Verdict::Partial || nominalResult == ibcore::Verdict::Budget)
+                    return nominalResult;
+                ibcore::Verdict const lateResult = checkManualTap(lateRepress, recovery.lateSafe);
+                if (lateResult == ibcore::Verdict::Partial || lateResult == ibcore::Verdict::Budget)
+                    return lateResult;
+
+                // Require the nominal rhythm and at least one neighbouring
+                // timing to work. A single frame-perfect recovery is rejected.
+                return recovery.robust() ? ibcore::Verdict::Good : ibcore::Verdict::Bad;
             });
             microProbeUs = static_cast<int>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - microStart).count());
             m_recordPath = oldRecordPath;
@@ -7993,7 +8058,10 @@ public:
             int const chosenReleaseStep = scaleTicks(plan.releaseAfterTicks, s);
             double const gridStart = m_gameTime - static_cast<double>(tickPhase()) * dt;
             double const releaseAt = gridStart + static_cast<double>(chosenReleaseStep) * dt;
-            if (plan && m_microCancelLatch.arm(std::max(m_gameTime, releaseAt))) {
+            // Do not fire late or snap a missed physics tick to "now": if the
+            // planned boundary has passed, the prediction no longer authorizes it.
+            if (plan && std::isfinite(releaseAt) && std::isfinite(m_gameTime) &&
+                releaseAt + TIME_EPS >= m_gameTime && m_microCancelLatch.arm(releaseAt)) {
                 microCancelTicks = plan.releaseAfterTicks;
                 m_microCancelModeCode = modeCode(p1);
                 m_microCancelReleaseTicks = microCancelTicks;
@@ -8418,6 +8486,9 @@ public:
         {
             int const mc = modeCode(player);
             if (mc != m_lastRealMode) {
+                // Straight-flight evidence must never carry across a portal.
+                m_p1StraightSamples = 0;
+                m_p1VerticalSpeed = 0.f;
                 if (m_lastRealMode >= 0) {
                     trace(fmt::format("real mode {} -> {} at ({:.1f},{:.1f}) lastPortalPos=({:.1f},{:.1f}) portalY={:.1f}",
                                       m_lastRealMode, mc, player->getPositionX(), player->getPositionY(),
@@ -8439,7 +8510,9 @@ public:
         // Dead (and not reported through the hook): report once. Alive again
         // after a death without a level reset (some respawn paths): re-arm.
         if (player->m_isDead) {
-            m_microCancelLatch.cancelPending();
+            // A death resets the game's held-button state, so clear both the
+            // scheduled release and its pending physical-keyup swallow.
+            m_microCancelLatch.reset();
             m_microCancelModeCode = -1;
             m_microCancelReleaseTicks = 0;
             if (!m_deathReported) onRealDeath();
@@ -8469,13 +8542,12 @@ public:
         }
         if (m_microCancelLatch.process(m_gameTime, m_physicalHolding, m_gameHolding, TIME_EPS)) {
             int const releasedAfter = m_microCancelReleaseTicks;
-            // This is a synthetic release, not a measurement of the user's tap
-            // length. Do not feed it into the learned hold-rhythm calibrator.
-            m_lastPressAt = -1.0;
-            m_lastReleaseAt = m_gameTime;
+            // This is a synthetic release, not the user's physical key-up.
+            // Keep the original press timestamp until the physical release is
+            // received and swallowed in interceptInput(), where real rhythm is
+            // recorded. The stream/streak state is still reset immediately.
             m_lastInputTime = m_gameTime;
             m_streak = 0;
-            m_streamLast = m_gameTime;
             m_streamShift = 0.0;
             fireButton(pl, false);
             m_microCancelModeCode = -1;
