@@ -6046,7 +6046,7 @@ public:
         m_outcome.clear(); // respawned: the last input is settled (death already counted)
         m_p1LastT = -1.0;
         m_p1VerticalSpeed = 0.f;
-        m_p1MotionSamples = 0;
+        m_p1StraightSamples = 0;
         m_liveWaited = false;
     }
 
