@@ -7672,13 +7672,28 @@ public:
             }
         }
 
+        // The original spam guard short-circuits before simulation. Only when
+        // the opt-in experiment is active and a measured target mode qualifies,
+        // let this press reach the normal predictor; otherwise preserve PassSpam.
+        bool const microWaveSpamCandidate = mode.wave && !mode.ship && inStream &&
+            m_lastReleaseAt >= 0.0 && m_gameTime >= m_lastReleaseAt &&
+            (m_gameTime - m_lastReleaseAt) <= STREAM_GAP_FRAMES;
+        float const microStraightTolerance = std::max(0.04f, m_p1Speed * 0.025f);
+        bool const microStraightShipCandidate = mode.ship && !mode.wave &&
+            m_p1StraightSamples >= 8 && m_p1Speed > 0.5f &&
+            std::fabs(m_p1VerticalSpeed) <= microStraightTolerance;
+        bool const microCancelSpamOverride = m_microCancelLevel > 0 && m_enabled && push &&
+            !isDual && !isTwoPlayerControl && p2 == nullptr &&
+            !m_queue.active() && !m_gameHolding &&
+            (microWaveSpamCandidate || microStraightShipCandidate);
+
         // 3. Streak-based spam guard (real-time interval, off in Extreme).
         if (mode.spamGuarded() && !c.extreme) {
             double const interval = m_gameTime - m_lastInputTime;
             if (interval < static_cast<double>(c.spamFrames)) m_streak++;
             else m_streak = 0;
             m_lastInputTime = m_gameTime;
-            if (m_streak >= c.spamStreak) return pass(Decision::PassSpam);
+            if (m_streak >= c.spamStreak && !microCancelSpamOverride) return pass(Decision::PassSpam);
         } else {
             m_streak = 0;
             m_lastInputTime = m_gameTime;
@@ -7922,20 +7937,13 @@ public:
         // PlayerObject. Partial/unknown paths, movers, orbs and timeouts fail closed.
         int microCancelTicks = 0;
         int microProbeUs = 0;
-        bool const waveSpamCandidate = mode.wave && !mode.ship && inStream &&
-            m_lastReleaseAt >= 0.0 && m_gameTime >= m_lastReleaseAt &&
-            (m_gameTime - m_lastReleaseAt) <= STREAM_GAP_FRAMES;
-        float const straightTolerance = std::max(0.04f, m_p1Speed * 0.025f);
-        bool const straightShipCandidate = mode.ship && !mode.wave &&
-            m_p1StraightSamples >= 8 && m_p1Speed > 0.5f &&
-            std::fabs(m_p1VerticalSpeed) <= straightTolerance;
         ibcore::MicroCancelGate microGate;
         microGate.enabled = m_microCancelLevel > 0 && m_enabled;
         microGate.press = push;
         microGate.wave = mode.wave;
         microGate.ship = mode.ship;
-        microGate.waveSpam = waveSpamCandidate;
-        microGate.straightFlight = straightShipCandidate;
+        microGate.waveSpam = microWaveSpamCandidate;
+        microGate.straightFlight = microStraightShipCandidate;
         microGate.dual = isDual || isTwoPlayerControl || p2 != nullptr;
         microGate.queueActive = m_queue.active();
         microGate.alreadyHolding = m_gameHolding;
