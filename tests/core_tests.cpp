@@ -1188,6 +1188,16 @@ static void testMicroCancelCore() {
           plan.releaseAfterTicks, plan.evals);
     CHECK(tested.size() == 2 && tested[0] == 1 && tested[1] == 2,
           "candidate order should be 1 then 2");
+
+    tested.clear();
+    auto const minimal = planMicroCancelMinimal(wave, [&](int ticks) {
+        tested.push_back(ticks);
+        return ticks <= 2 ? Verdict::Good : Verdict::Bad;
+    });
+    CHECK(minimal.releaseAfterTicks == 2 && minimal.evals == 2,
+          "minimal intervention should choose the latest proven release");
+    CHECK(tested.size() == 2 && tested[0] == 3 && tested[1] == 2,
+          "minimal intervention should inspect later releases first");
     wave.maxTicks = 1;
     auto none = planMicroCancel(wave, [](int) { return Verdict::Bad; });
     CHECK(!none && none.evals == 1, "one-tick profile exceeded its limit");
