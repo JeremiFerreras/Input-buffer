@@ -130,10 +130,13 @@ class VideoProfileTests(unittest.TestCase):
         self.assertIn("no Input Buffer button", SOURCE)
 
     def test_console_pump_runs_in_game_layer_without_buffer_window(self):
-        self.assertEqual(SOURCE.count("LogConsole::pump();"), 1)
+        self.assertEqual(SOURCE.count("LogConsole::pump();"), 2)
         game_start = SOURCE.index("class $modify(BufBaseGameLayer")
         game_end = SOURCE.index("bool canBeActivatedByPlayer", game_start)
-        self.assertIn("LogConsole::pump();", SOURCE[game_start:game_end])
+        self.assertEqual(SOURCE[game_start:game_end].count("LogConsole::pump();"), 1)
+        status_start = SOURCE.index("void reportMicroCancelStatus()")
+        status_end = SOURCE.index("void cycleMicroCancel()", status_start)
+        self.assertIn("LogConsole::pump();", SOURCE[status_start:status_end])
         window_start = SOURCE.index("class BufferWindow")
         window_update_start = SOURCE.index("void update(float dt) override", window_start)
         window_update_end = SOURCE.index("// ---- touches", window_update_start)
@@ -190,7 +193,7 @@ class VideoProfileTests(unittest.TestCase):
         self.assertIn("the mod must not keep pressing for the player", sim)
 
     def test_experimental_micro_cancel_starts_disabled(self):
-        self.assertIn('"micro-cancel-cycle-key"', MOD["settings"])
+        self.assertIn("micro-cancel-cycle-key", MOD["settings"])
         self.assertEqual(MOD["settings"]["micro-cancel-cycle-key"]["default"], "F9")
         self.assertIn("MicroCancelProfile::Off", SOURCE)
         self.assertIn("EXPERIMENTAL MICRO-CANCEL", SOURCE)
