@@ -90,9 +90,15 @@ class VideoProfileTests(unittest.TestCase):
         ):
             self.assertIn(required, console)
         self.assertIn('if (!s_on || !s_out) return;', console)
-        self.assertIn('raw(prefix, A_MUTED);', console)
-        self.assertIn('raw(label, tagAttr(tag));', console)
-        self.assertNotIn('raw(indent, A_MUTED);', console)
+        pump = console[console.index('static void pump()'):console.index('static size_t pendingCount()')]
+        event = console[console.index('static void event(float seconds'):console.index('static void preset(')]
+        self.assertIn('raw(line.prefix, A_MUTED);', pump)
+        self.assertIn('raw(line.label, line.labelAttr);', pump)
+        self.assertIn('raw(line.body, line.bodyAttr);', pump)
+        self.assertIn('while (count++ < MAX_LINES_PER_FRAME', pump)
+        self.assertIn('enqueue(std::move(line));', event)
+        self.assertNotIn('WriteConsoleA(', event)
+        self.assertNotIn('raw(', event)
         self.assertNotIn('Sleep(', console)
         self.assertNotIn('std::thread', console)
         self.assertNotIn('SetTimer(', console)
