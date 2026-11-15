@@ -23,6 +23,7 @@ struct PathResult {
     int ticks = 0;
     int presses = 0;
     int releases = 0;
+    int manualPresses = 0;
 };
 
 enum class Model { WaveSpam, StraightShip };
@@ -30,7 +31,8 @@ enum class Model { WaveSpam, StraightShip };
 // Toy vertical corridor. Wave switches vertical direction on key-up; ship
 // applies thrust while down and gravity while up. This is a deterministic
 // GD-inspired fixture, not a substitute for the real Geometry Dash engine.
-PathResult simulate(Model model, double startY, double startVy, int releaseAt, bool keepHeld) {
+PathResult simulate(Model model, double startY, double startVy, int releaseAt, bool keepHeld,
+                    int manualPressAt = -1, int horizon = 8) {
     constexpr double floorY = 0.0;
     constexpr double ceilingY = 22.0;
     PathResult out;
@@ -38,10 +40,17 @@ PathResult simulate(Model model, double startY, double startVy, int releaseAt, b
     double vy = startVy;
     bool held = true;
     out.presses = 1;
-    for (int tick = 0; tick < 12; ++tick) {
+    for (int tick = 0; tick < horizon; ++tick) {
         if (!keepHeld && releaseAt == tick) {
             held = false;
             ++out.releases;
+        }
+        // This is a hypothetical HUMAN follow-up used only by the fixture;
+        // the mod's runtime hook never sends it.
+        if (manualPressAt == tick) {
+            held = true;
+            ++out.presses;
+            ++out.manualPresses;
         }
         if (model == Model::WaveSpam) {
             vy = held ? 2.0 : -2.0;
@@ -83,41 +92,51 @@ MicroCancelGate shipGate(int maxTicks = 3) {
 }
 
 void testWaveSpamMicroSave() {
-    auto baseline = simulate(Model::WaveSpam, 18.0, 0.0, -1, true);
+    auto baseline = simulate(Model::WaveSpam, 14.0, 0.0, -1, true, -1, 12);
     check(baseline.died, "wave spam baseline should die while held");
     auto plan = planMicroCancel(waveGate(), [&](int ticks) {
-        auto result = simulate(Model::WaveSpam, 18.0, 0.0, ticks, false);
+        auto result = simulate(Model::WaveSpam, 14.0, 0.0, ticks, false, -1, ticks + 3);
         return result.died ? Verdict::Bad : Verdict::Good;
     });
     check(plan.releaseAfterTicks == 1, "wave should find a 1-tick micro release");
-    auto saved = simulate(Model::WaveSpam, 18.0, 0.0, plan.releaseAfterTicks, false);
-    check(!saved.died && saved.presses == 1 && saved.releases == 1,
-          "wave micro-cancel should save with exactly one press and one release");
+    int const humanPressAt = plan.releaseAfterTicks + 3;
+    auto recoveryWindow = simulate(Model::WaveSpam, 14.0, 0.0, plan.releaseAfterTicks, false,
+                                   -1, humanPressAt);
+    auto saved = simulate(Model::WaveSpam, 14.0, 0.0, plan.releaseAfterTicks, false,
+                          humanPressAt, humanPressAt + 4);
+    check(!recoveryWindow.died && !saved.died && saved.releases == 1 &&
+          saved.manualPresses == 1 && saved.presses == 2,
+          "wave must allow a human follow-up after exactly one automatic release");
     std::printf("wave spam: held dies at tick %d; one release at tick %d survives %d ticks\n",
                 baseline.ticks, plan.releaseAfterTicks, saved.ticks);
 }
 
 void testStraightShipMicroSave() {
-    auto baseline = simulate(Model::StraightShip, 18.0, 0.0, -1, true);
+    auto baseline = simulate(Model::StraightShip, 14.0, 0.0, -1, true, -1, 12);
     check(baseline.died, "straight-ship baseline should die while held");
     auto plan = planMicroCancel(shipGate(), [&](int ticks) {
-        auto result = simulate(Model::StraightShip, 18.0, 0.0, ticks, false);
+        auto result = simulate(Model::StraightShip, 14.0, 0.0, ticks, false, -1, ticks + 3);
         return result.died ? Verdict::Bad : Verdict::Good;
     });
     check(plan.releaseAfterTicks == 1, "straight ship should find a 1-tick release");
-    auto saved = simulate(Model::StraightShip, 18.0, 0.0, plan.releaseAfterTicks, false);
-    check(!saved.died && saved.presses == 1 && saved.releases == 1,
-          "ship micro-cancel should save with exactly one press and one release");
+    int const humanPressAt = plan.releaseAfterTicks + 3;
+    auto recoveryWindow = simulate(Model::StraightShip, 14.0, 0.0, plan.releaseAfterTicks, false,
+                                   -1, humanPressAt);
+    auto saved = simulate(Model::StraightShip, 14.0, 0.0, plan.releaseAfterTicks, false,
+                          humanPressAt, humanPressAt + 4);
+    check(!recoveryWindow.died && !saved.died && saved.releases == 1 &&
+          saved.manualPresses == 1 && saved.presses == 2,
+          "straight ship must allow a human follow-up after one automatic release");
     std::printf("straight ship: held dies at tick %d; one release at tick %d survives %d ticks\n",
                 baseline.ticks, plan.releaseAfterTicks, saved.ticks);
 }
 
 void testNeverCancelsWithoutProof() {
     auto gate = waveGate();
-    auto baseline = simulate(Model::WaveSpam, 21.0, 0.0, -1, true);
+    auto baseline = simulate(Model::WaveSpam, 21.0, 0.0, -1, true, -1, 12);
     check(baseline.died, "no-window baseline should die");
     auto plan = planMicroCancel(gate, [&](int ticks) {
-        auto result = simulate(Model::WaveSpam, 21.0, 0.0, ticks, false);
+        auto result = simulate(Model::WaveSpam, 21.0, 0.0, ticks, false, -1, ticks + 3);
         return result.died ? Verdict::Bad : Verdict::Good;
     });
     check(!plan, "no release should be approved when every candidate still dies");

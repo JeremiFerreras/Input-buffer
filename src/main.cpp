@@ -7942,14 +7942,21 @@ public:
             m_deadline = microStart + std::chrono::microseconds(microBudgetUs);
             auto const plan = ibcore::planMicroCancel(microGate, [&](int baseTicks) {
                 int const releaseStep = scaleTicks(baseTicks, s);
+                // Check a short, bounded recovery window after the one-shot
+                // release. It proves the player has time to provide their NEXT
+                // manual press; this code does not generate that press.
+                int const recoveryTicks = scaleTicks(3, s);
+                int const recoveryHorizon = releaseStep + recoveryTicks;
+                if (recoveryHorizon > x.horizon) return ibcore::Verdict::Bad;
                 FollowUp oneShot;
                 oneShot.at[0] = releaseStep;
                 oneShot.held[0] = false;
-                SimResult const candidate = runSim(x, 0, oneShot);
+                SimResult const candidate = sim(0, oneShot, recoveryHorizon);
                 if (candidate.end == SimEnd::OutOfBudget) return ibcore::Verdict::Budget;
                 if (candidate.end == SimEnd::Truncated || candidate.trunc.valid ||
                     candidate.mover || candidate.orbUsed) return ibcore::Verdict::Partial;
-                if (candidate.end != SimEnd::Survived) return ibcore::Verdict::Bad;
+                if (candidate.end != SimEnd::Survived || candidate.ticks < recoveryHorizon)
+                    return ibcore::Verdict::Bad;
                 if (candidate.clear < clearTarget(mode.name()) + 0.75f) return ibcore::Verdict::Bad;
                 return ibcore::Verdict::Good;
             });
