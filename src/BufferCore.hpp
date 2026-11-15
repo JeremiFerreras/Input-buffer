@@ -385,6 +385,25 @@ inline bool microCancelEligible(MicroCancelGate const& g) {
     return waveSpam || straightShip;
 }
 
+// A one-shot release is only useful when the player's normal next tap still
+// has a forgiving recovery window. The nominal rhythm must work, plus at
+// least one adjacent timing sample; a single frame-perfect follow-up is not
+// enough evidence to intervene.
+struct MicroCancelRecoveryWindow {
+    bool earlySafe = false;
+    bool nominalSafe = false;
+    bool lateSafe = false;
+
+    int safeCount() const {
+        return static_cast<int>(earlySafe) +
+               static_cast<int>(nominalSafe) +
+               static_cast<int>(lateSafe);
+    }
+    bool robust() const {
+        return nominalSafe && (earlySafe || lateSafe);
+    }
+};
+
 struct MicroCancelPlan {
     int releaseAfterTicks = 0;
     int evals = 0;
@@ -417,7 +436,7 @@ MicroCancelPlan planMicroCancel(MicroCancelGate const& gate, Eval&& eval) {
 class MicroCancelLatch {
 public:
     bool arm(double dueAt) {
-        if (m_pending || m_released || !std::isfinite(dueAt)) return false;
+        if (m_pending || m_released || !std::isfinite(dueAt) || dueAt < 0.0) return false;
         m_dueAt = dueAt;
         m_pending = true;
         return true;
@@ -425,11 +444,17 @@ public:
 
     bool process(double now, bool physicalHeld, bool gameHeld, double eps = 1e-6) {
         if (!m_pending) return false;
+        // Invalid clocks must cancel the one-shot, never turn bad timing data
+        // into permission to release a button early.
+        if (!std::isfinite(now) || !std::isfinite(eps) || eps < 0.0) {
+            cancelPending();
+            return false;
+        }
         if (!physicalHeld || !gameHeld) {
             cancelPending();
             return false;
         }
-        if (now + eps < m_dueAt) return false;
+        if (now < m_dueAt - eps) return false;
         m_pending = false;
         m_dueAt = -1.0;
         m_released = true;
