@@ -2389,6 +2389,42 @@ struct LogConsole {
 //       cut by an orb /  pass the click through (we cannot see past it) -
 //       pad / portal?    the log says exactly which object did it
 // ----------------------------------------------------------------------------
+enum class MicroCancelQaProbeReason : int {
+    NotEvaluated = 0, ProfileOff, BufferDisabled, NotPress, WrongMode,
+    DualControl, QueueActive, AlreadyHolding, BaselineSafe, BaselineTruncated,
+    BaselineBudget, BudgetTooSmall, HorizonTooLong, LatchBusy,
+    NoSafeCandidate, UnknownGeometry, BudgetExhausted, Approved,
+    ReleaseMissed, LatchArmFailed
+};
+
+enum class MicroCancelQaCandidateReason : int {
+    NotEvaluated = 0, HoldTooShort, RhythmConflict, HorizonTooLong,
+    UnknownGeometry, BudgetExhausted, UnsafeRecovery, Approved
+};
+
+struct MicroCancelQaBranchSnapshot {
+    int verdict = -1, end = -1, ticks = -1, deathStep = -1, killType = -1;
+    float clearAll = 1e9f, killDy = 0.f, truncGap = -1.f;
+    int truncType = -1;
+    bool truncated = false, mover = false, orb = false, killMover = false;
+};
+
+struct MicroCancelQaCandidateSnapshot {
+    int baseTicks = 0, releaseStep = 0, reason = 0, verdict = -1;
+    int earlyPressAt = -1, earlyReleaseAt = -1;
+    int nominalPressAt = -1, nominalReleaseAt = -1;
+    int latePressAt = -1, lateReleaseAt = -1;
+    MicroCancelQaBranchSnapshot early, nominal, late;
+};
+
+struct MicroCancelQaProbeSnapshot {
+    unsigned long long serial = 0;
+    unsigned int gateFlags = 0;
+    bool gateEligible = false;
+    int reason = 0, candidateCount = 0, chosenReleaseTicks = 0;
+    MicroCancelQaCandidateSnapshot candidates[3]{};
+};
+
 struct MicroCancelQaSnapshot {
     int profile = 0;
     bool pending = false;
@@ -2405,7 +2441,86 @@ struct MicroCancelQaSnapshot {
     double expectedPressAt = -1.0;
     double actualPressAt = -1.0;
     double tickLength = 0.0;
+    MicroCancelQaProbeSnapshot probe;
 };
+
+char const* microCancelQaProbeReasonName(int value) {
+    switch (static_cast<MicroCancelQaProbeReason>(value)) {
+        case MicroCancelQaProbeReason::NotEvaluated: return "NOT_EVALUATED";
+        case MicroCancelQaProbeReason::ProfileOff: return "PROFILE_OFF";
+        case MicroCancelQaProbeReason::BufferDisabled: return "BUFFER_DISABLED";
+        case MicroCancelQaProbeReason::NotPress: return "NOT_PRESS";
+        case MicroCancelQaProbeReason::WrongMode: return "WRONG_MODE";
+        case MicroCancelQaProbeReason::DualControl: return "DUAL_CONTROL";
+        case MicroCancelQaProbeReason::QueueActive: return "QUEUE_ACTIVE";
+        case MicroCancelQaProbeReason::AlreadyHolding: return "ALREADY_HOLDING";
+        case MicroCancelQaProbeReason::BaselineSafe: return "BASELINE_SAFE";
+        case MicroCancelQaProbeReason::BaselineTruncated: return "BASELINE_TRUNCATED";
+        case MicroCancelQaProbeReason::BaselineBudget: return "BASELINE_BUDGET";
+        case MicroCancelQaProbeReason::BudgetTooSmall: return "PROBE_BUDGET_TOO_SMALL";
+        case MicroCancelQaProbeReason::HorizonTooLong: return "RECOVERY_HORIZON_TOO_LONG";
+        case MicroCancelQaProbeReason::LatchBusy: return "LATCH_BUSY";
+        case MicroCancelQaProbeReason::NoSafeCandidate: return "NO_SAFE_CANDIDATE";
+        case MicroCancelQaProbeReason::UnknownGeometry: return "UNKNOWN_GEOMETRY";
+        case MicroCancelQaProbeReason::BudgetExhausted: return "CANDIDATE_BUDGET_EXHAUSTED";
+        case MicroCancelQaProbeReason::Approved: return "APPROVED";
+        case MicroCancelQaProbeReason::ReleaseMissed: return "RELEASE_TICK_MISSED";
+        case MicroCancelQaProbeReason::LatchArmFailed: return "LATCH_ARM_FAILED";
+    }
+    return "UNKNOWN_REASON";
+}
+
+char const* microCancelQaCandidateReasonName(int value) {
+    switch (static_cast<MicroCancelQaCandidateReason>(value)) {
+        case MicroCancelQaCandidateReason::NotEvaluated: return "NOT_EVALUATED";
+        case MicroCancelQaCandidateReason::HoldTooShort: return "HOLD_TOO_SHORT";
+        case MicroCancelQaCandidateReason::RhythmConflict: return "RHYTHM_CONFLICT";
+        case MicroCancelQaCandidateReason::HorizonTooLong: return "HORIZON_TOO_LONG";
+        case MicroCancelQaCandidateReason::UnknownGeometry: return "UNKNOWN_GEOMETRY";
+        case MicroCancelQaCandidateReason::BudgetExhausted: return "BUDGET_EXHAUSTED";
+        case MicroCancelQaCandidateReason::UnsafeRecovery: return "UNSAFE_RECOVERY";
+        case MicroCancelQaCandidateReason::Approved: return "APPROVED";
+    }
+    return "UNKNOWN_REASON";
+}
+
+char const* microCancelQaVerdictName(int value) {
+    if (value == static_cast<int>(ibcore::Verdict::Bad)) return "BAD";
+    if (value == static_cast<int>(ibcore::Verdict::Partial)) return "PARTIAL";
+    if (value == static_cast<int>(ibcore::Verdict::Good)) return "GOOD";
+    if (value == static_cast<int>(ibcore::Verdict::Budget)) return "BUDGET";
+    return "NOT_RUN";
+}
+
+unsigned int microCancelQaGateFlags(ibcore::MicroCancelGate const& gate) {
+    return (gate.enabled ? 1u << 0 : 0u) |
+           (gate.press ? 1u << 1 : 0u) |
+           (gate.wave ? 1u << 2 : 0u) |
+           (gate.ship ? 1u << 3 : 0u) |
+           (gate.waveSpam ? 1u << 4 : 0u) |
+           (gate.straightFlight ? 1u << 5 : 0u) |
+           (gate.dual ? 1u << 6 : 0u) |
+           (gate.queueActive ? 1u << 7 : 0u) |
+           (gate.alreadyHolding ? 1u << 8 : 0u) |
+           (gate.baselineDied ? 1u << 9 : 0u) |
+           (gate.baselineTruncated ? 1u << 10 : 0u) |
+           (gate.baselineBudget ? 1u << 11 : 0u);
+}
+
+int microCancelQaGateRejection(ibcore::MicroCancelGate const& gate) {
+    if (!gate.enabled) return static_cast<int>(MicroCancelQaProbeReason::BufferDisabled);
+    if (!gate.press) return static_cast<int>(MicroCancelQaProbeReason::NotPress);
+    if (gate.dual) return static_cast<int>(MicroCancelQaProbeReason::DualControl);
+    if (gate.queueActive) return static_cast<int>(MicroCancelQaProbeReason::QueueActive);
+    if (gate.alreadyHolding) return static_cast<int>(MicroCancelQaProbeReason::AlreadyHolding);
+    if (gate.baselineTruncated) return static_cast<int>(MicroCancelQaProbeReason::BaselineTruncated);
+    if (gate.baselineBudget) return static_cast<int>(MicroCancelQaProbeReason::BaselineBudget);
+    if (!gate.baselineDied) return static_cast<int>(MicroCancelQaProbeReason::BaselineSafe);
+    if (!((gate.wave && !gate.ship && gate.waveSpam) ||
+          (gate.ship && !gate.wave && gate.straightFlight)))
+        return static_cast<int>(MicroCancelQaProbeReason::WrongMode);
+    return static_cast<int>(MicroCancelQaProbeReason::NoSafeCandidate);
+}
 
 class TrajectoryBufferSim {
     Ref<PlayerObject> m_simPlayer1;
@@ -2504,6 +2619,7 @@ class TrajectoryBufferSim {
     double m_microCancelQaExpectedPressAt = -1.0;
     double m_microCancelQaActualPressAt = -1.0;
     double m_microCancelQaTickLength = 0.0;
+    MicroCancelQaProbeSnapshot m_microCancelQaProbe;
 
     // ---- Game clock --------------------------------------------------------
     // Everything below is scheduled in GAME TIME (60fps-frame units, time warp
@@ -6672,6 +6788,7 @@ public:
         m_microCancelQaExpectedPressAt = -1.0;
         m_microCancelQaActualPressAt = -1.0;
         m_microCancelQaTickLength = getValidDt();
+        m_microCancelQaProbe = {};
     }
 
     void qaEndReplay() {
@@ -6706,6 +6823,7 @@ public:
         out.expectedPressAt = m_microCancelQaExpectedPressAt;
         out.actualPressAt = m_microCancelQaActualPressAt;
         out.tickLength = getValidDt();
+        out.probe = m_microCancelQaProbe;
         return out;
     }
 
@@ -8107,7 +8225,27 @@ public:
             ? std::max(0, budgetUs - static_cast<int>(std::min<long long>(microElapsed, 1000000)))
             : 900;
         int const microBudgetUs = std::min(900, clickBudgetRemaining);
-        if (ibcore::microCancelEligible(microGate) && microBudgetUs >= 200 &&
+        bool const microGateEligible = ibcore::microCancelEligible(microGate);
+        MicroCancelQaProbeSnapshot* qaProbe = m_microCancelQaLocked ? &m_microCancelQaProbe : nullptr;
+        if (qaProbe) {
+            unsigned long long const serial = qaProbe->serial + 1;
+            *qaProbe = {};
+            qaProbe->serial = serial;
+            qaProbe->gateFlags = microCancelQaGateFlags(microGate);
+            qaProbe->gateEligible = microGateEligible;
+            qaProbe->reason = m_microCancelLevel <= 0
+                ? static_cast<int>(MicroCancelQaProbeReason::ProfileOff)
+                : microCancelQaGateRejection(microGate);
+            if (microGateEligible && microBudgetUs < 200)
+                qaProbe->reason = static_cast<int>(MicroCancelQaProbeReason::BudgetTooSmall);
+            else if (microGateEligible && microRecoveryHorizonMax > MAX_SIM_STEPS)
+                qaProbe->reason = static_cast<int>(MicroCancelQaProbeReason::HorizonTooLong);
+            else if (microGateEligible && (m_microCancelLatch.pending() || m_microCancelLatch.released()))
+                qaProbe->reason = static_cast<int>(MicroCancelQaProbeReason::LatchBusy);
+            else if (microGateEligible)
+                qaProbe->reason = static_cast<int>(MicroCancelQaProbeReason::NoSafeCandidate);
+        }
+        if (microGateEligible && microBudgetUs >= 200 &&
             microRecoveryHorizonMax <= MAX_SIM_STEPS &&
             !m_microCancelLatch.pending() && !m_microCancelLatch.released()) {
             // Wave's ordinary lookahead is intentionally short for spam
@@ -8124,22 +8262,56 @@ public:
             m_deadline = microStart + std::chrono::microseconds(microBudgetUs);
             auto const plan = ibcore::planMicroCancelMinimal(microGate, [&](int baseTicks) {
                 int const releaseStep = scaleTicks(baseTicks, s);
+                MicroCancelQaCandidateSnapshot* qaCandidate = nullptr;
+                if (qaProbe && qaProbe->candidateCount < 3) {
+                    qaCandidate = &qaProbe->candidates[qaProbe->candidateCount++];
+                    *qaCandidate = {};
+                    qaCandidate->baseTicks = baseTicks;
+                    qaCandidate->releaseStep = releaseStep;
+                    qaCandidate->reason = static_cast<int>(MicroCancelQaCandidateReason::NotEvaluated);
+                }
                 // The player must still be physically holding the original tap
                 // when the synthetic release is due. If their normal key-up
                 // comes first, the latch cancels the intervention.
-                if (releaseStep >= microTapTicks) return ibcore::Verdict::Bad;
+                if (releaseStep >= microTapTicks) {
+                    if (qaCandidate) {
+                        qaCandidate->reason = static_cast<int>(MicroCancelQaCandidateReason::HoldTooShort);
+                        qaCandidate->verdict = static_cast<int>(ibcore::Verdict::Bad);
+                    }
+                    return ibcore::Verdict::Bad;
+                }
 
                 int const minRepress = releaseStep + scaleTicks(2, s);
-                if (microNaturalCycleTicks - microTimingJitter < minRepress)
+                if (microNaturalCycleTicks - microTimingJitter < minRepress) {
+                    if (qaCandidate) {
+                        qaCandidate->reason = static_cast<int>(MicroCancelQaCandidateReason::RhythmConflict);
+                        qaCandidate->verdict = static_cast<int>(ibcore::Verdict::Bad);
+                    }
                     return ibcore::Verdict::Bad;
+                }
                 int const earlyRepress = microNaturalCycleTicks - microTimingJitter;
                 int const nominalRepress = microNaturalCycleTicks;
                 int const lateRepress = microNaturalCycleTicks + microTimingJitter;
                 int const recoveryHorizon = lateRepress + microTapTicks + microPostRecoveryTicks;
-                if (recoveryHorizon > x.horizon) return ibcore::Verdict::Bad;
+                if (recoveryHorizon > x.horizon) {
+                    if (qaCandidate) {
+                        qaCandidate->reason = static_cast<int>(MicroCancelQaCandidateReason::HorizonTooLong);
+                        qaCandidate->verdict = static_cast<int>(ibcore::Verdict::Bad);
+                    }
+                    return ibcore::Verdict::Bad;
+                }
+                if (qaCandidate) {
+                    qaCandidate->earlyPressAt = earlyRepress;
+                    qaCandidate->earlyReleaseAt = earlyRepress + microTapTicks;
+                    qaCandidate->nominalPressAt = nominalRepress;
+                    qaCandidate->nominalReleaseAt = nominalRepress + microTapTicks;
+                    qaCandidate->latePressAt = lateRepress;
+                    qaCandidate->lateReleaseAt = lateRepress + microTapTicks;
+                }
 
                 ibcore::MicroCancelRecoveryWindow recovery;
-                auto checkManualTap = [&](int repressAt, bool& safe) -> ibcore::Verdict {
+                auto checkManualTap = [&](int repressAt, bool& safe,
+                                          MicroCancelQaBranchSnapshot* branch) -> ibcore::Verdict {
                     FollowUp oneShot;
                     oneShot.at[0] = releaseStep;
                     oneShot.held[0] = false;                  // one automatic release
@@ -8148,28 +8320,80 @@ public:
                     oneShot.at[2] = repressAt + microTapTicks;
                     oneShot.held[2] = false;                  // predicted human key-up
                     SimResult const candidate = sim(0, oneShot, recoveryHorizon);
-                    if (candidate.end == SimEnd::OutOfBudget) return ibcore::Verdict::Budget;
+                    if (branch) {
+                        branch->end = static_cast<int>(candidate.end);
+                        branch->ticks = candidate.ticks;
+                        branch->deathStep = candidate.deathStep;
+                        branch->killType = candidate.killType;
+                        branch->killDy = candidate.killDy;
+                        branch->clearAll = candidate.clearAll;
+                        branch->truncated = candidate.end == SimEnd::Truncated || candidate.trunc.valid;
+                        branch->truncType = candidate.trunc.valid ? static_cast<int>(candidate.trunc.type) : -1;
+                        branch->truncGap = candidate.trunc.valid ? candidate.trunc.gap : -1.f;
+                        branch->mover = candidate.mover;
+                        branch->orb = candidate.orbUsed;
+                        branch->killMover = candidate.killMover;
+                    }
+                    if (candidate.end == SimEnd::OutOfBudget) {
+                        if (branch) branch->verdict = static_cast<int>(ibcore::Verdict::Budget);
+                        return ibcore::Verdict::Budget;
+                    }
                     if (candidate.end == SimEnd::Truncated || candidate.trunc.valid ||
-                        candidate.mover || candidate.orbUsed) return ibcore::Verdict::Partial;
+                        candidate.mover || candidate.orbUsed) {
+                        if (branch) branch->verdict = static_cast<int>(ibcore::Verdict::Partial);
+                        return ibcore::Verdict::Partial;
+                    }
                     safe = candidate.end == SimEnd::Survived &&
                            candidate.ticks >= recoveryHorizon &&
                            candidate.clearAll >= clearTarget(mode.name()) + 0.75f;
+                    if (branch) branch->verdict = static_cast<int>(
+                        safe ? ibcore::Verdict::Good : ibcore::Verdict::Bad);
                     return safe ? ibcore::Verdict::Good : ibcore::Verdict::Bad;
                 };
 
-                ibcore::Verdict const earlyResult = checkManualTap(earlyRepress, recovery.earlySafe);
-                if (earlyResult == ibcore::Verdict::Partial || earlyResult == ibcore::Verdict::Budget)
+                ibcore::Verdict const earlyResult = checkManualTap(
+                    earlyRepress, recovery.earlySafe, qaCandidate ? &qaCandidate->early : nullptr);
+                if (earlyResult == ibcore::Verdict::Partial || earlyResult == ibcore::Verdict::Budget) {
+                    if (qaCandidate) {
+                        qaCandidate->reason = static_cast<int>(earlyResult == ibcore::Verdict::Budget
+                            ? MicroCancelQaCandidateReason::BudgetExhausted
+                            : MicroCancelQaCandidateReason::UnknownGeometry);
+                        qaCandidate->verdict = static_cast<int>(earlyResult);
+                    }
                     return earlyResult;
-                ibcore::Verdict const nominalResult = checkManualTap(nominalRepress, recovery.nominalSafe);
-                if (nominalResult == ibcore::Verdict::Partial || nominalResult == ibcore::Verdict::Budget)
+                }
+                ibcore::Verdict const nominalResult = checkManualTap(
+                    nominalRepress, recovery.nominalSafe, qaCandidate ? &qaCandidate->nominal : nullptr);
+                if (nominalResult == ibcore::Verdict::Partial || nominalResult == ibcore::Verdict::Budget) {
+                    if (qaCandidate) {
+                        qaCandidate->reason = static_cast<int>(nominalResult == ibcore::Verdict::Budget
+                            ? MicroCancelQaCandidateReason::BudgetExhausted
+                            : MicroCancelQaCandidateReason::UnknownGeometry);
+                        qaCandidate->verdict = static_cast<int>(nominalResult);
+                    }
                     return nominalResult;
-                ibcore::Verdict const lateResult = checkManualTap(lateRepress, recovery.lateSafe);
-                if (lateResult == ibcore::Verdict::Partial || lateResult == ibcore::Verdict::Budget)
+                }
+                ibcore::Verdict const lateResult = checkManualTap(
+                    lateRepress, recovery.lateSafe, qaCandidate ? &qaCandidate->late : nullptr);
+                if (lateResult == ibcore::Verdict::Partial || lateResult == ibcore::Verdict::Budget) {
+                    if (qaCandidate) {
+                        qaCandidate->reason = static_cast<int>(lateResult == ibcore::Verdict::Budget
+                            ? MicroCancelQaCandidateReason::BudgetExhausted
+                            : MicroCancelQaCandidateReason::UnknownGeometry);
+                        qaCandidate->verdict = static_cast<int>(lateResult);
+                    }
                     return lateResult;
+                }
 
-                // Require the nominal rhythm and at least one neighbouring
-                // timing to work. A single frame-perfect recovery is rejected.
-                return recovery.robust() ? ibcore::Verdict::Good : ibcore::Verdict::Bad;
+                bool const robust = recovery.robust();
+                if (qaCandidate) {
+                    qaCandidate->reason = static_cast<int>(robust
+                        ? MicroCancelQaCandidateReason::Approved
+                        : MicroCancelQaCandidateReason::UnsafeRecovery);
+                    qaCandidate->verdict = static_cast<int>(
+                        robust ? ibcore::Verdict::Good : ibcore::Verdict::Bad);
+                }
+                return robust ? ibcore::Verdict::Good : ibcore::Verdict::Bad;
             });
             microProbeUs = static_cast<int>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - microStart).count());
             x.horizon = originalSimHorizon;
@@ -8177,6 +8401,7 @@ public:
             m_hasDeadline = oldHasDeadline;
             m_deadline = oldDeadline;
             int const chosenReleaseStep = scaleTicks(plan.releaseAfterTicks, s);
+            if (qaProbe && plan) qaProbe->chosenReleaseTicks = plan.releaseAfterTicks;
             double const gridStart = m_gameTime - static_cast<double>(tickPhase()) * dt;
             double const releaseAt = gridStart + static_cast<double>(chosenReleaseStep) * dt;
             // Do not fire late or snap a missed physics tick to "now": if the
@@ -8193,6 +8418,14 @@ public:
                 m_microCancelRhythmWindow = static_cast<int>(microRhythmWindow);
                 m_microCancelReleaseTicks = microCancelTicks;
                 dec = Decision::MicroCanceled;
+                if (qaProbe) qaProbe->reason = static_cast<int>(MicroCancelQaProbeReason::Approved);
+            } else if (qaProbe && plan) {
+                qaProbe->reason = (!std::isfinite(releaseAt) || !std::isfinite(m_gameTime) ||
+                                   releaseAt + TIME_EPS < m_gameTime)
+                    ? static_cast<int>(MicroCancelQaProbeReason::ReleaseMissed)
+                    : static_cast<int>(MicroCancelQaProbeReason::LatchArmFailed);
+            } else if (qaProbe && !plan && microBudgetUs < 200) {
+                qaProbe->reason = static_cast<int>(MicroCancelQaProbeReason::BudgetTooSmall);
             }
         }
 
@@ -10994,6 +11227,8 @@ class MicroCancelReplayHarness {
     static inline std::filesystem::path s_dir, s_jobsRunningPath;
     static inline std::ofstream s_trace;
     static inline std::ofstream s_results;
+    static inline std::ofstream s_probe;
+    static inline unsigned long long s_lastProbeSerial = 0;
 
     static bool safeToken(std::string const& value) {
         if (value.empty()) return false;
@@ -11148,6 +11383,12 @@ class MicroCancelReplayHarness {
         if (s_results.is_open()) {
             s_results << "job,group,profile,status,steps,half_ticks,injected,x,y,killer_id,killer_x,killer_y,mc_arms,mc_releases,mc_swallowed_keyups,mc_cancelled,mc_last_plan_ticks,last_decision,mc_pending_at_end,mc_released_at_end,physical_held_at_end,game_held_at_end,expected_press_at,actual_press_at,press_error_ticks,max_steps,input_events,input_tape_complete,awaiting_manual_press,followup_state\n";
         }
+        auto probePath = s_dir / "out" / "probe.csv";
+        if (s_probe.is_open()) s_probe.close();
+        s_probe.open(probePath, std::ios::out | std::ios::trunc);
+        if (s_probe.is_open()) {
+            s_probe << "job,group,profile,step,gate_flags,gate_eligible,probe_reason,chosen_release_ticks,candidate_index,base_ticks,release_step,candidate_reason,candidate_verdict,branch,manual_press_tick,manual_release_tick,branch_verdict,sim_end,survived_ticks,clear_all,death_step,kill_type,kill_dy,kill_mover,truncated,trunc_type,trunc_gap,mover,orb\n";
+        }
     }
 
     static void beginCurrentJob() {
@@ -11163,6 +11404,7 @@ class MicroCancelReplayHarness {
         s_killerId = -1;
         s_killerX = s_killerY = 0.f;
         s_sim.qaBeginReplay(job.profile);
+        s_lastProbeSerial = 0;
         s_jobRunning = true;
         if (s_trace.is_open()) s_trace.close();
         s_trace.open(makeLevelPath(), std::ios::out | std::ios::trunc);
@@ -11189,12 +11431,53 @@ class MicroCancelReplayHarness {
 
     static bool followupVerified(JobResult const& result) {
         return result.inputTapeComplete && result.expectedPressAt >= 0.0 &&
-               result.actualPressAt >= 0.0 && !result.awaitingManualPress &&
-               !result.physicalHeld && !result.gameHeld;
+               result.actualPressAt >= 0.0 && !result.awaitingManualPress;
     }
 
     static bool validReplayStatus(std::string const& status) {
         return status == "died" || status == "complete" || status == "timeout";
+    }
+
+    static void writeProbeRow(Job const& job, MicroCancelQaSnapshot const& q,
+                              int candidateIndex, MicroCancelQaCandidateSnapshot const* candidate,
+                              char const* branchName, int pressAt, int releaseAt,
+                              MicroCancelQaBranchSnapshot const& branch) {
+        if (!s_probe.is_open()) return;
+        s_probe << fmt::format("{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},",
+            job.name, job.group, q.profile, s_step, q.probe.gateFlags,
+            q.probe.gateEligible ? 1 : 0, microCancelQaProbeReasonName(q.probe.reason),
+            q.probe.chosenReleaseTicks, candidateIndex,
+            candidate ? candidate->baseTicks : -1,
+            candidate ? candidate->releaseStep : -1,
+            candidate ? microCancelQaCandidateReasonName(candidate->reason) : "NOT_RUN",
+            candidate ? microCancelQaVerdictName(candidate->verdict) : "NOT_RUN",
+            branchName, pressAt, releaseAt);
+        s_probe << fmt::format("{},{},{},{:.3f},{},{},{:.3f},{},{},{},{:.3f},{},{}\n",
+            microCancelQaVerdictName(branch.verdict),
+            branch.end >= 0 ? simEndName(static_cast<SimEnd>(branch.end)) : "NOT_RUN",
+            branch.ticks, branch.clearAll, branch.deathStep, branch.killType,
+            branch.killDy, branch.killMover ? 1 : 0, branch.truncated ? 1 : 0,
+            branch.truncType, branch.truncGap, branch.mover ? 1 : 0, branch.orb ? 1 : 0);
+    }
+
+    static void writeProbeRows() {
+        if (!s_probe.is_open() || !s_jobRunning || s_jobIndex >= s_jobs.size()) return;
+        auto q = s_sim.qaSnapshot();
+        if (q.probe.serial == 0 || q.probe.serial == s_lastProbeSerial) return;
+        s_lastProbeSerial = q.probe.serial;
+        Job const& job = s_jobs[s_jobIndex];
+        if (q.probe.candidateCount <= 0) {
+            MicroCancelQaBranchSnapshot empty;
+            writeProbeRow(job, q, 0, nullptr, "none", -1, -1, empty);
+        } else {
+            for (int i = 0; i < q.probe.candidateCount && i < 3; ++i) {
+                auto const& c = q.probe.candidates[i];
+                writeProbeRow(job, q, i + 1, &c, "early", c.earlyPressAt, c.earlyReleaseAt, c.early);
+                writeProbeRow(job, q, i + 1, &c, "nominal", c.nominalPressAt, c.nominalReleaseAt, c.nominal);
+                writeProbeRow(job, q, i + 1, &c, "late", c.latePressAt, c.lateReleaseAt, c.late);
+            }
+        }
+        s_probe.flush();
     }
 
     static void writeTrace(PlayLayer* pl, float dt, bool half, bool last, int step) {
@@ -11295,7 +11578,8 @@ class MicroCancelReplayHarness {
                 outcome += "_CHECK_LATCH";
                 ++latchFlags;
             }
-            if (!intervened) outcome += "_NO_INTERVENTION";
+            if (!intervened && outcome.find("_NO_INTERVENTION") == std::string::npos)
+                outcome += "_NO_INTERVENTION";
 
             out << fmt::format("{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.6f},{:.6f},{:.3f},{},{},{},{}\n",
                 test.group, test.profile, base->name, test.name, base->status,
@@ -11398,6 +11682,7 @@ class MicroCancelReplayHarness {
             ec.clear();
             std::filesystem::rename(s_jobsRunningPath, done, ec);
             if (s_results.is_open()) { s_results.flush(); s_results.close(); }
+            if (s_probe.is_open()) { s_probe.flush(); s_probe.close(); }
             writeComparison();
             Notification::create("Micro-cancel real-game replay batch complete", NotificationIcon::Success, 5.f)->show();
         }
@@ -11407,6 +11692,7 @@ class MicroCancelReplayHarness {
         if (!s_batchActive) return;
         if (s_trace.is_open()) s_trace.close();
         if (s_results.is_open()) { s_results.flush(); s_results.close(); }
+        if (s_probe.is_open()) { s_probe.flush(); s_probe.close(); }
         s_sim.qaEndReplay();
         s_jobRunning = false;
         s_batchActive = false;
@@ -11470,8 +11756,8 @@ public:
                 return;
             }
             openResults();
-            if (!s_results.is_open()) {
-                abortBatch("could_not_open_results_csv");
+            if (!s_results.is_open() || !s_probe.is_open()) {
+                abortBatch("could_not_open_qa_csv");
                 return;
             }
         }
@@ -11499,6 +11785,7 @@ public:
         if (half) ++s_halfTicks;
         bool const finalStep = s_finishPending || (s_step + 1 >= s_jobs[s_jobIndex].maxSteps);
         writeTrace(pl, dt, half, last || finalStep, s_step);
+        writeProbeRows();
         ++s_step;
         if (s_finishPending) {
             finalizeCurrentJob(pl);

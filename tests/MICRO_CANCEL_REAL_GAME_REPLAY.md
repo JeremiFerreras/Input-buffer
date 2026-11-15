@@ -68,3 +68,24 @@ New result labels:
 Each recreated scene preserves the source level type and song metadata. Every scene
 starts with fresh tap/gap rhythm calibration, so several safe warm-up tap cycles
 must precede the target click. The example tape adds a later manual follow-up pair.
+
+
+## Candidate-level probe diagnostics
+
+The batch now also writes `out/probe.csv`. It records each candidate release tick
+(1T/2T/3T) and its early, nominal, and late manual-recovery branches. Each branch
+includes the simulator verdict/end state, survived ticks, full-path clearance,
+death step, killing object type/vertical offset, truncation, moving-hazard and
+orb flags. Candidates rejected before simulation still get a row with the reason.
+
+`probe_reason` distinguishes profile/buffer state, wrong mode, dual/queue/held
+input, safe or truncated baseline, insufficient CPU budget, horizon limit,
+busy latch, no safe candidate, unknown geometry, exhausted candidate budget,
+approved plan, missed physics tick, and latch-arm failure. `candidate_reason`
+distinguishes insufficient original hold, rhythm conflict, horizon limit,
+unknown geometry, budget exhaustion, unsafe recovery, and acceptance.
+
+`gate_flags` is a bitmask: bit 0 enabled, 1 press, 2 Wave, 3 Ship, 4 Wave spam,
+5 straight Ship, 6 dual, 7 queue active, 8 already holding, 9 baseline died,
+10 baseline truncated, 11 baseline budget-limited. Branch clearances are in
+pixels; negative `death_step` / `kill_type` means no recorded death.
