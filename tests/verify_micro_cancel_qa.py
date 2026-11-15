@@ -68,6 +68,8 @@ def main():
         ("microCancelQaGateFlags", "eligibility gate flags must be recorded"),
         ("candidate.clearAll", "candidate full-path clearance must be captured"),
         ("candidate.killType", "candidate killer type must be captured"),
+        ("qaProbe->baseline.killType = r0.killType", "original fatal baseline details must be captured"),
+        ("baseline_clearance", "probe CSV must include original baseline clearance"),
         ("microCancelQaProbeReasonName", "probe rejection reasons must be labelled"),
         ("followupVerified(test)", "save classification must verify follow-up"),
         ("SURVIVED_UNVERIFIED_FOLLOWUP", "unverified survival must not count as a save"),

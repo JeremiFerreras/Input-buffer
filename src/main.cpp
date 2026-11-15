@@ -2422,6 +2422,7 @@ struct MicroCancelQaProbeSnapshot {
     unsigned int gateFlags = 0;
     bool gateEligible = false;
     int reason = 0, candidateCount = 0, chosenReleaseTicks = 0;
+    MicroCancelQaBranchSnapshot baseline;
     MicroCancelQaCandidateSnapshot candidates[3]{};
 };
 
@@ -8233,6 +8234,18 @@ public:
             qaProbe->serial = serial;
             qaProbe->gateFlags = microCancelQaGateFlags(microGate);
             qaProbe->gateEligible = microGateEligible;
+            qaProbe->baseline.end = static_cast<int>(r0.end);
+            qaProbe->baseline.ticks = r0.ticks;
+            qaProbe->baseline.deathStep = r0.deathStep;
+            qaProbe->baseline.killType = r0.killType;
+            qaProbe->baseline.killDy = r0.killDy;
+            qaProbe->baseline.clearAll = r0.clearAll;
+            qaProbe->baseline.truncated = r0.end == SimEnd::Truncated || r0.trunc.valid;
+            qaProbe->baseline.truncType = r0.trunc.valid ? static_cast<int>(r0.trunc.type) : -1;
+            qaProbe->baseline.truncGap = r0.trunc.valid ? r0.trunc.gap : -1.f;
+            qaProbe->baseline.mover = r0.mover;
+            qaProbe->baseline.orb = r0.orbUsed;
+            qaProbe->baseline.killMover = r0.killMover;
             qaProbe->reason = m_microCancelLevel <= 0
                 ? static_cast<int>(MicroCancelQaProbeReason::ProfileOff)
                 : microCancelQaGateRejection(microGate);
@@ -8395,6 +8408,17 @@ public:
                 }
                 return robust ? ibcore::Verdict::Good : ibcore::Verdict::Bad;
             });
+            if (qaProbe && !plan) {
+                for (int i = 0; i < qaProbe->candidateCount && i < 3; ++i) {
+                    int const candidateReason = qaProbe->candidates[i].reason;
+                    if (candidateReason == static_cast<int>(MicroCancelQaCandidateReason::BudgetExhausted)) {
+                        qaProbe->reason = static_cast<int>(MicroCancelQaProbeReason::BudgetExhausted);
+                        break;
+                    }
+                    if (candidateReason == static_cast<int>(MicroCancelQaCandidateReason::UnknownGeometry))
+                        qaProbe->reason = static_cast<int>(MicroCancelQaProbeReason::UnknownGeometry);
+                }
+            }
             microProbeUs = static_cast<int>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - microStart).count());
             x.horizon = originalSimHorizon;
             m_recordPath = oldRecordPath;
@@ -11387,7 +11411,7 @@ class MicroCancelReplayHarness {
         if (s_probe.is_open()) s_probe.close();
         s_probe.open(probePath, std::ios::out | std::ios::trunc);
         if (s_probe.is_open()) {
-            s_probe << "job,group,profile,step,gate_flags,gate_eligible,probe_reason,chosen_release_ticks,candidate_index,base_ticks,release_step,candidate_reason,candidate_verdict,branch,manual_press_tick,manual_release_tick,branch_verdict,sim_end,survived_ticks,clear_all,death_step,kill_type,kill_dy,kill_mover,truncated,trunc_type,trunc_gap,mover,orb\n";
+            s_probe << "job,group,profile,step,gate_flags,gate_eligible,probe_reason,baseline_end,baseline_survived_ticks,baseline_clearance,baseline_death_step,baseline_kill_type,baseline_kill_dy,baseline_kill_mover,baseline_truncated,baseline_trunc_type,baseline_trunc_gap,baseline_mover,baseline_orb,chosen_release_ticks,candidate_index,base_ticks,release_step,candidate_reason,candidate_verdict,branch,manual_press_tick,manual_release_tick,branch_verdict,sim_end,survived_ticks,clear_all,death_step,kill_type,kill_dy,kill_mover,truncated,trunc_type,trunc_gap,mover,orb\n";
         }
     }
 
@@ -11443,16 +11467,20 @@ class MicroCancelReplayHarness {
                               char const* branchName, int pressAt, int releaseAt,
                               MicroCancelQaBranchSnapshot const& branch) {
         if (!s_probe.is_open()) return;
-        s_probe << fmt::format("{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},",
+        auto const& baseline = q.probe.baseline;
+        s_probe << fmt::format("{},{},{},{},{},{},{},{},{},{:.3f},{},{},{:.3f},{},{},{},{:.3f},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.3f},{},{},{:.3f},{},{},{},{:.3f},{},{}\n",
             job.name, job.group, q.profile, s_step, q.probe.gateFlags,
             q.probe.gateEligible ? 1 : 0, microCancelQaProbeReasonName(q.probe.reason),
+            baseline.end >= 0 ? simEndName(static_cast<SimEnd>(baseline.end)) : "NOT_RUN",
+            baseline.ticks, baseline.clearAll, baseline.deathStep, baseline.killType,
+            baseline.killDy, baseline.killMover ? 1 : 0, baseline.truncated ? 1 : 0,
+            baseline.truncType, baseline.truncGap, baseline.mover ? 1 : 0, baseline.orb ? 1 : 0,
             q.probe.chosenReleaseTicks, candidateIndex,
             candidate ? candidate->baseTicks : -1,
             candidate ? candidate->releaseStep : -1,
             candidate ? microCancelQaCandidateReasonName(candidate->reason) : "NOT_RUN",
             candidate ? microCancelQaVerdictName(candidate->verdict) : "NOT_RUN",
-            branchName, pressAt, releaseAt);
-        s_probe << fmt::format("{},{},{},{:.3f},{},{},{:.3f},{},{},{},{:.3f},{},{}\n",
+            branchName, pressAt, releaseAt,
             microCancelQaVerdictName(branch.verdict),
             branch.end >= 0 ? simEndName(static_cast<SimEnd>(branch.end)) : "NOT_RUN",
             branch.ticks, branch.clearAll, branch.deathStep, branch.killType,

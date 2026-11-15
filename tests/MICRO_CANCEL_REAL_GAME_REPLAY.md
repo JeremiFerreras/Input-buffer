@@ -89,3 +89,10 @@ unknown geometry, budget exhaustion, unsafe recovery, and acceptance.
 5 straight Ship, 6 dual, 7 queue active, 8 already holding, 9 baseline died,
 10 baseline truncated, 11 baseline budget-limited. Branch clearances are in
 pixels; negative `death_step` / `kill_type` means no recorded death.
+
+
+Each probe row also repeats the original no-intervention `r0` baseline result:
+its simulator end state, clearance, death tick, killer object type/vertical offset,
+truncation, movers and orbs. This lets you compare the original fatal trajectory
+against early/nominal/late recovery branches without reconstructing the baseline
+from a different file.
