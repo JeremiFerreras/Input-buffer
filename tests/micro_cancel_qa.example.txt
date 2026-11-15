@@ -1,0 +1,18 @@
+# Copy this file to <Geode save dir>/micro-cancel-qa/jobs.txt.
+# Step numbers count GJBaseGameLayer::processCommands calls, starting at 0.
+# Replace this illustrative tape with the same recorded sequence for every job.
+# Profile: 0 = Micro-cancel OFF, 1 = 1T, 2 = 2T, 3 = 3T.
+# max_steps is the maximum number of processCommands calls for this job.
+#
+# One group must include profile 0 and at least one active profile.
+# All jobs in a group must use the exact same input tape.
+# Inputs alternate: 1 = press, 0 = release. Finish with a release.
+
+job wave_spam_off wave_corridor 0 1800
+inputs 40:1 43:0 49:1 52:0 58:1 61:0 67:1 70:0 76:1 79:0 85:1 88:0
+job wave_spam_1t wave_corridor 1 1800
+inputs 40:1 43:0 49:1 52:0 58:1 61:0 67:1 70:0 76:1 79:0 85:1 88:0
+job wave_spam_2t wave_corridor 2 1800
+inputs 40:1 43:0 49:1 52:0 58:1 61:0 67:1 70:0 76:1 79:0 85:1 88:0
+job wave_spam_3t wave_corridor 3 1800
+inputs 40:1 43:0 49:1 52:0 58:1 61:0 67:1 70:0 76:1 79:0 85:1 88:0
