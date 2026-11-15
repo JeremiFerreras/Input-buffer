@@ -7996,6 +7996,8 @@ public:
             static_cast<int>(std::lround((microTapFrames + microGapFrames) / dt)));
         int const microTimingJitter = std::max(1, scaleTicks(2, s));
         int const microPostRecoveryTicks = scaleTicks(4, s);
+        int const microRecoveryHorizonMax =
+            microNaturalCycleTicks + microTimingJitter + microTapTicks + microPostRecoveryTicks;
 
         long long const microElapsed = std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - t0).count();
         int const clickBudgetRemaining = budgetUs > 0
@@ -8003,7 +8005,13 @@ public:
             : 900;
         int const microBudgetUs = std::min(900, clickBudgetRemaining);
         if (ibcore::microCancelEligible(microGate) && microBudgetUs >= 200 &&
+            microRecoveryHorizonMax <= MAX_SIM_STEPS &&
             !m_microCancelLatch.pending() && !m_microCancelLatch.released()) {
+            // Wave's ordinary lookahead is intentionally short for spam
+            // performance. Extend it only for this bounded micro-cancel probe,
+            // far enough to test the player's next natural tap, then restore it.
+            int const originalSimHorizon = x.horizon;
+            x.horizon = std::max(x.horizon, microRecoveryHorizonMax);
             bool const oldRecordPath = m_recordPath;
             bool const oldHasDeadline = m_hasDeadline;
             auto const oldDeadline = m_deadline;
@@ -8061,6 +8069,7 @@ public:
                 return recovery.robust() ? ibcore::Verdict::Good : ibcore::Verdict::Bad;
             });
             microProbeUs = static_cast<int>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - microStart).count());
+            x.horizon = originalSimHorizon;
             m_recordPath = oldRecordPath;
             m_hasDeadline = oldHasDeadline;
             m_deadline = oldDeadline;
