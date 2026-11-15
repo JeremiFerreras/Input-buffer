@@ -193,7 +193,7 @@ class VideoProfileTests(unittest.TestCase):
         self.assertIn("saved.manualPresses == 1", sim)
         self.assertIn("saved.releases == 2", sim)
         self.assertIn("releaseOnly.died", sim)
-        self.assertIn("testRequiresRobustRecoveryWindow", sim)
+        self.assertIn("testRecoveryWindowRequiresNaturalAndNeighbour", sim)
         self.assertIn("the mod must not keep pressing for the player", sim)
 
     def test_experimental_micro_cancel_starts_disabled(self):
@@ -210,8 +210,8 @@ class VideoProfileTests(unittest.TestCase):
         self.assertIn("horizontalStable && nearHorizontal", SOURCE)
         self.assertNotIn("m_p1MotionSamples", SOURCE)
         self.assertIn("m_p1StraightSamples = 0;", SOURCE)
-        self.assertIn("candidate.end != SimEnd::Survived", SOURCE)
-        self.assertIn("candidate.ticks < recoveryHorizon", SOURCE)
+        self.assertIn("candidate.end == SimEnd::Survived", SOURCE)
+        self.assertIn("candidate.ticks >= recoveryHorizon", SOURCE)
         self.assertIn("bool const microCancelSpamOverride", SOURCE)
         self.assertIn("m_streak >= c.spamStreak && !microCancelSpamOverride", SOURCE)
         self.assertIn("!isDual && !isTwoPlayerControl && p2 == nullptr", SOURCE)
