@@ -6622,6 +6622,7 @@ public:
     // notify: the "Input Buffer - Stage 3 ..." banner - only for the F6 key
     // (2.1); the window shows the stage itself.
     void setStage(int stage, bool notify = false) {
+        if (m_microCancelQaLocked) return;
         stage = std::clamp(stage, 0, STAGE_COUNT - 1);
         Mod::get()->setSettingValue<std::string>("stage", STAGES[stage].setting);
         invalidateCfg();
@@ -6641,6 +6642,7 @@ public:
     // Cycle key (F6): Stage 1 -> 2 -> 3 -> 4 -> Extreme -> Custom -> Off -> Stage 1.
     // Reads the stage directly, so it can never lose track of where it is.
     void cyclePreset() {
+        if (m_microCancelQaLocked) return;
         int const cur = Config::load().stage;
         int const next = (cur == STAGE_COUNT - 1) ? 0 : cur + 1;
         setStage(next, true);
@@ -11262,7 +11264,14 @@ public:
             auto base = Mod::get()->getSaveDir() / "micro-cancel-qa";
             auto jobsPath = base / "jobs.txt";
             std::error_code ec;
-            if (!std::filesystem::exists(jobsPath, ec)) return;
+            if (!std::filesystem::exists(jobsPath, ec)) {
+                static bool pathLogged = false;
+                if (!pathLogged) {
+                    log::info("[MicroCancelQA] optional replay file path: {}", jobsPath.string());
+                    pathLogged = true;
+                }
+                return;
+            }
             std::vector<Job> jobs;
             std::string error;
             if (!parseJobs(jobsPath, jobs, error)) {
