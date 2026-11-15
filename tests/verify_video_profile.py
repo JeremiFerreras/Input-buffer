@@ -129,6 +129,16 @@ class VideoProfileTests(unittest.TestCase):
         self.assertIn("Deliberately do not create the Input Buffer window", SOURCE)
         self.assertIn("no Input Buffer button", SOURCE)
 
+    def test_console_pump_runs_in_game_layer_without_buffer_window(self):
+        self.assertEqual(SOURCE.count("LogConsole::pump();"), 1)
+        game_start = SOURCE.index("class $modify(BufBaseGameLayer")
+        game_end = SOURCE.index("bool canBeActivatedByPlayer", game_start)
+        self.assertIn("LogConsole::pump();", SOURCE[game_start:game_end])
+        window_start = SOURCE.index("class BufferWindow")
+        window_update_start = SOURCE.index("void update(float dt) override", window_start)
+        window_update_end = SOURCE.index("// ---- touches", window_update_start)
+        self.assertNotIn("LogConsole::pump();", SOURCE[window_update_start:window_update_end])
+
     def test_automatic_paused_scan_is_bounded_and_console_only(self):
         self.assertIn("constexpr int    SCAN_SLICE_US           = 2000", SOURCE)
         self.assertIn('getSettingValue<bool>("auto-scan")', SOURCE)
@@ -181,6 +191,17 @@ class VideoProfileTests(unittest.TestCase):
         self.assertEqual(MOD["settings"]["micro-cancel-cycle-key"]["default"], "F9")
         self.assertIn("MicroCancelProfile::Off", SOURCE)
         self.assertIn("EXPERIMENTAL MICRO-CANCEL", SOURCE)
+        self.assertIn("MicroCancelLatch m_microCancelLatch", SOURCE)
+        self.assertIn("m_microCancelLevel = static_cast<int>(ibcore::MicroCancelProfile::Off)", SOURCE)
+        self.assertIn('listenForKeybindSettingPresses("micro-cancel-cycle-key"', SOURCE)
+        self.assertIn("bool const waveSpamCandidate", SOURCE)
+        self.assertIn("bool const straightShipCandidate", SOURCE)
+        self.assertIn("candidate.end != SimEnd::Survived", SOURCE)
+        self.assertIn("candidate.clear < clearTarget(mode.name()) + 0.75f", SOURCE)
+        self.assertIn("oneShot.held[0] = false", SOURCE)
+        self.assertIn("fireButton(pl, false);", SOURCE)
+        self.assertIn("m_microCancelLatch.consumePhysicalRelease()", SOURCE)
+        self.assertIn("LogConsole::pump(); // bounded terminal output", SOURCE)
 
     def test_f6_cycles_five_modes_then_wraps(self):
         self.assertIn("int const next = (cur == STAGE_COUNT - 1) ? 0 : cur + 1;", SOURCE)

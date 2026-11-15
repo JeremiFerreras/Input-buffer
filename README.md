@@ -21,6 +21,7 @@ A Geometry Dash 2.2081 / Geode mod fork that tests input timings against simulat
 |---|---|
 | `F6` | Cycle Stage 1 → Stage 2 → Stage 3 → Stage 4 → Off |
 | `F7` | Close or reopen the Windows live console |
+| `F9` | Cycle Experimental Micro-Cancel: OFF → 1T → 2T → 3T → OFF |
 
 The stage limits are expressed in base physics ticks:
 
@@ -33,6 +34,16 @@ The stage limits are expressed in base physics ticks:
 | Off | Raw input | Raw input |
 
 The current fork's console is Windows-only. The repository metadata contains other platform targets, but the automated Geode build currently produces and validates only a Windows package; other platforms should be considered unverified by this workflow.
+
+## Experimental micro-cancel (test branch only)
+
+**This feature is experimental and disabled at every program launch.** Press F9 to cycle exactly four states: OFF, one, two, or three base ticks. The selection is session-only and is never saved.
+
+It only considers a fresh press when the normal predictor says the immediate press dies with no safe delayed press, and only in wave spam or measured near-horizontal straight ship flight. It asks the existing hidden Geometry Dash player simulator whether one early key-up at +1, +2, or +3 base ticks survives with extra clearance. If the baseline or candidate path is truncated, involves moving hazards/orbs, exceeds the CPU budget, or returns an uncertain result, it does nothing.
+
+When approved, the mod sends exactly one key-up. It never auto-presses, repeats a tap, or runs a sequence. If the user releases first, the scheduled cancellation is dropped. After an automatic release, the matching physical key-up is swallowed once so the game does not receive a duplicate release. F9 can turn the mode OFF and cancel a pending release.
+
+This feature has a hard extra simulation budget under 1 ms per eligible attempt, is excluded from dual/two-player input, and must be tested in practice mode. The deterministic tests use simplified GD-inspired wave/ship corridors; they test the scheduling policy, not the proprietary game's full physics. Runtime candidates are checked with the mod's in-game hidden-player simulator. Do not treat this as a guaranteed save.
 
 ## Scanning and safety
 
@@ -61,6 +72,8 @@ The standalone core tests do not require Geometry Dash or the Geode SDK. From th
 ```sh
 g++ -std=c++20 -O2 -I src tests/core_tests.cpp -o core_tests
 ./core_tests
+g++ -std=c++20 -O2 -I src tests/micro_cancel_sim.cpp -o micro_cancel_sim
+./micro_cancel_sim
 python3 tests/verify_video_profile.py
 python3 -m json.tool mod.json > /dev/null
 ```

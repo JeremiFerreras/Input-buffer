@@ -51,6 +51,13 @@
 			"default": "F7",
 			"category": "general"
 		},
+		"micro-cancel-cycle-key": {
+			"type": "keybind",
+			"name": "Experimental Micro-Cancel Cycle Key",
+			"description": "EXPERIMENTAL and OFF every launch. Cycles OFF, 1, 2 or 3 base-tick one-shot releases. Only for confirmed wave spam or straight ship no-fix cases. Never generates a press.",
+			"default": "F9",
+			"category": "gameplay"
+		},
 		"auto-scan": {
 			"type": "bool",
 			"name": "Automatic Level Scan",
