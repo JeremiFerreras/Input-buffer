@@ -1282,14 +1282,15 @@ static void testMicroCancelLifecycleFuzz() {
                     }
                 }
                 break;
-            case 3: // arm only for a currently-held physical/game button
+            case 3: // the caller's gate checks held state before asking the latch to arm
                 if (physicalHeld && gameHeld && !latch.pending() && !latch.released()) {
-                    CHECK(latch.arm(now + 1.0 + static_cast<double>(next() % 3)),
-                          "fresh held press should arm once");
-                    ++arms;
-                } else {
-                    CHECK(!latch.arm(now + 1.0),
-                          "latch armed without an idle held press");
+                    bool const armed = latch.arm(now + 1.0 + static_cast<double>(next() % 3));
+                    CHECK(armed, "fresh held press should arm once");
+                    if (armed) ++arms;
+                } else if (latch.pending() || latch.released()) {
+                    // The latch itself owns only its one-shot lifecycle. The
+                    // gameplay eligibility gate owns physical/game-held state.
+                    CHECK(!latch.arm(now + 1.0), "busy latch accepted a second arm");
                 }
                 break;
             case 4: // physics step
