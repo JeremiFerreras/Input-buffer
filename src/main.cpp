@@ -2411,7 +2411,7 @@ class TrajectoryBufferSim {
     float  m_p1Speed = 0.f, m_p1Dir = 1.f; // real P1 horizontal speed (px / frame), direction
     float  m_p1VerticalSpeed = 0.f; // vertical displacement per 60fps-frame
     float  m_p1LastX = 0.f, m_p1LastY = 0.f;
-    int    m_p1MotionSamples = 0;
+    int    m_p1StraightSamples = 0;
     double m_p1LastT = -1.0;
     long long m_spotFires = 0, m_spotBlocks = 0, m_spotSaves = 0;
     std::filesystem::path m_spotFile;  // <save dir>/spots/<level>.txt ("" = not saved)
@@ -5705,7 +5705,7 @@ public:
         m_spotFires = m_spotBlocks = m_spotSaves = 0;
         m_p1LastT = -1.0;
         m_p1VerticalSpeed = 0.f;
-        m_p1MotionSamples = 0;
+        m_p1StraightSamples = 0;
         m_levelStart = Clock::now();
         m_frameDt = BASE_DT;
         m_dtIdx = 0;
@@ -6473,21 +6473,35 @@ public:
             if (gap > 0.05 && gap < 3.0) {
                 float const vx = static_cast<float>((x - m_p1LastX) / gap);
                 float const vy = static_cast<float>((y - m_p1LastY) / gap);
-                if (std::fabs(vx) < 200.f) {
-                    m_p1Speed = std::fabs(vx);
-                    if (std::fabs(vx) > 0.1f) m_p1Dir = vx >= 0.f ? 1.f : -1.f;
-                }
-                if (std::fabs(vy) < 200.f) {
-                    m_p1VerticalSpeed = vy;
-                    m_p1MotionSamples = std::min(m_p1MotionSamples + 1, 30);
+                bool const validMotion = std::fabs(vx) < 200.f && std::fabs(vy) < 200.f;
+                float const horizontalSpeed = std::fabs(vx);
+                float const stableSpeedDelta = std::max(0.08f, horizontalSpeed * 0.05f);
+                float const straightTolerance = std::max(0.04f, horizontalSpeed * 0.025f);
+                bool const horizontalStable = m_p1Speed <= 0.1f ||
+                    std::fabs(horizontalSpeed - m_p1Speed) <= stableSpeedDelta;
+                bool const nearHorizontal = std::fabs(vy) <= straightTolerance;
+                if (validMotion && horizontalSpeed > 0.5f && horizontalStable && nearHorizontal) {
+                    m_p1StraightSamples = std::min(m_p1StraightSamples + 1, 30);
                 } else {
-                    m_p1MotionSamples = 0;
+                    m_p1StraightSamples = 0;
                 }
+                if (validMotion) {
+                    m_p1Speed = horizontalSpeed;
+                    if (std::fabs(vx) > 0.1f) m_p1Dir = vx >= 0.f ? 1.f : -1.f;
+                    m_p1VerticalSpeed = vy;
+                }
+                m_p1LastX = x;
+                m_p1LastY = y;
+                m_p1LastT = m_gameTime;
+            } else if (gap >= 3.0) {
+                // A stale sample cannot be used to claim straight flight.
+                m_p1StraightSamples = 0;
                 m_p1LastX = x;
                 m_p1LastY = y;
                 m_p1LastT = m_gameTime;
             }
         } else {
+            m_p1StraightSamples = 0;
             m_p1LastX = x;
             m_p1LastY = y;
             m_p1LastT = m_gameTime;
@@ -7913,7 +7927,7 @@ public:
             (m_gameTime - m_lastReleaseAt) <= STREAM_GAP_FRAMES;
         float const straightTolerance = std::max(0.04f, m_p1Speed * 0.025f);
         bool const straightShipCandidate = mode.ship && !mode.wave &&
-            m_p1MotionSamples >= 8 && m_p1Speed > 0.5f &&
+            m_p1StraightSamples >= 8 && m_p1Speed > 0.5f &&
             std::fabs(m_p1VerticalSpeed) <= straightTolerance;
         ibcore::MicroCancelGate microGate;
         microGate.enabled = m_microCancelLevel > 0 && m_enabled;

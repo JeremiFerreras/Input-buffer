@@ -202,6 +202,8 @@ class VideoProfileTests(unittest.TestCase):
         self.assertIn('listenForKeybindSettingPresses("micro-cancel-cycle-key"', SOURCE)
         self.assertIn("bool const waveSpamCandidate", SOURCE)
         self.assertIn("bool const straightShipCandidate", SOURCE)
+        self.assertIn("horizontalStable && nearHorizontal", SOURCE)
+        self.assertIn("m_p1StraightSamples = 0;", SOURCE)
         self.assertIn("candidate.end != SimEnd::Survived", SOURCE)
         self.assertIn("candidate.ticks < recoveryHorizon", SOURCE)
         self.assertIn("int const recoveryTicks = scaleTicks(3, s);", SOURCE)
