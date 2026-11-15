@@ -2464,7 +2464,6 @@ class TrajectoryBufferSim {
     int m_microCancelLevel = static_cast<int>(ibcore::MicroCancelProfile::Off);
     int m_microCancelModeCode = -1;
     int m_microCancelReleaseTicks = 0;
-    long long m_microCancelArmed = 0, m_microCancelFired = 0;
     ibcore::MicroCancelLatch m_microCancelLatch;
 
     // ---- Game clock --------------------------------------------------------
@@ -7976,7 +7975,6 @@ public:
                 microCancelTicks = plan.releaseAfterTicks;
                 m_microCancelModeCode = modeCode(p1);
                 m_microCancelReleaseTicks = microCancelTicks;
-                m_microCancelArmed++;
                 dec = Decision::MicroCanceled;
             }
         }
@@ -8449,19 +8447,15 @@ public:
         }
         if (m_microCancelLatch.process(m_gameTime, m_physicalHolding, m_gameHolding, TIME_EPS)) {
             int const releasedAfter = m_microCancelReleaseTicks;
-            ModeInfo releasedMode;
-            releasedMode.add(player);
-            WinIdx const rhythmWindow = primaryWin(releasedMode, true);
-            if (m_lastPressAt >= 0.0) {
-                double const heldFor = m_gameTime - m_lastPressAt;
-                if (heldFor > 0.0 && heldFor < 60.0) m_holdLen[rhythmWindow].add(static_cast<float>(heldFor));
-            }
+            // This is a synthetic release, not a measurement of the user's tap
+            // length. Do not feed it into the learned hold-rhythm calibrator.
             m_lastPressAt = -1.0;
             m_lastReleaseAt = m_gameTime;
+            m_lastInputTime = m_gameTime;
+            m_streak = 0;
             m_streamLast = m_gameTime;
             m_streamShift = 0.0;
             fireButton(pl, false);
-            m_microCancelFired++;
             m_microCancelModeCode = -1;
             m_microCancelReleaseTicks = 0;
             pushLog(fmt::format("NOTE: EXPERIMENTAL MICRO-CANCEL sent one release after {} base tick(s); no re-press was generated.",

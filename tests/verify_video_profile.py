@@ -212,6 +212,13 @@ class VideoProfileTests(unittest.TestCase):
         self.assertIn("LogConsole::pump(); // surface the startup/current mode notice immediately", SOURCE)
         self.assertIn("oneShot.held[0] = false", SOURCE)
         self.assertIn("fireButton(pl, false);", SOURCE)
+        release_start = SOURCE.index("if (m_microCancelLatch.process(")
+        release_end = SOURCE.index("ensureSimPlayers(pl);", release_start)
+        release_path = SOURCE[release_start:release_end]
+        self.assertNotIn("m_holdLen", release_path)
+        self.assertIn("m_lastInputTime = m_gameTime;", release_path)
+        self.assertIn("m_streak = 0;", release_path)
+        self.assertNotIn("fireButton(pl, true)", release_path)
         self.assertIn("m_microCancelLatch.consumePhysicalRelease()", SOURCE)
         self.assertIn("LogConsole::pump(); // bounded terminal output", SOURCE)
 
