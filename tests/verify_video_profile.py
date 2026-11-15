@@ -194,7 +194,7 @@ class VideoProfileTests(unittest.TestCase):
         self.assertIn("saved.releases == 2", sim)
         self.assertIn("releaseOnly.died", sim)
         self.assertIn("testRecoveryWindowRequiresNaturalAndNeighbour", sim)
-        self.assertIn("the mod must not keep pressing for the player", sim)
+        self.assertIn("release-only does not keep playing or press for the user", sim)
 
     def test_experimental_micro_cancel_starts_disabled(self):
         self.assertIn("micro-cancel-cycle-key", MOD["settings"])
@@ -234,6 +234,9 @@ class VideoProfileTests(unittest.TestCase):
         self.assertIn("m_streak = 0;", release_path)
         self.assertNotIn("fireButton(pl, true)", release_path)
         self.assertIn("m_microCancelLatch.consumePhysicalRelease()", SOURCE)
+        self.assertIn("m_holdLen[releaseWindow].add", SOURCE)
+        self.assertIn("m_microCancelRhythmWindow = static_cast<int>(microRhythmWindow)", SOURCE)
+        self.assertIn("m_microCancelRhythmWindow = -1;", SOURCE)
         self.assertIn("LogConsole::pump(); // bounded terminal output", SOURCE)
 
     def test_f6_cycles_five_modes_then_wraps(self):
