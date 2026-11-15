@@ -1146,6 +1146,7 @@ static void testMicroCancelCore() {
     wave.press = true;
     wave.wave = true;
     wave.waveSpam = true;
+    wave.baselineDied = true;
     wave.maxTicks = 3;
     CHECK(microCancelEligible(wave), "wave spam gate rejected eligible press");
     MicroCancelGate ship = wave;
