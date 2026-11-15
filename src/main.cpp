@@ -1828,6 +1828,9 @@ struct SimResult {
     int       firstRingLast = -1;    // last step of that contact (in a row)
     int       nextRingTick = -1;     // first step you overlap ANOTHER orb after using one
     int       deathStep = -1;  // step (from the start, incl. the delay) it died on
+    // Minimum clearance across the entire simulated path, not just the first
+    // 100 ms decision-commit window. Used only by micro-cancel's recovery proof.
+    float     clearAll = 1e9f;
 };
 // Extra inputs injected into a test at fixed steps (-1 = none).
 struct FollowUp {
@@ -5266,6 +5269,7 @@ private:
         for (auto it = m_objRestore.rbegin(); it != m_objRestore.rend(); ++it) it->first->m_isActivated = it->second;
         m_objRestore.clear();
 
+        out.clearAll = m_scanClr;
         out.mover = m_simMover;
         out.killType = m_simKillType;
         out.killMover = m_simKillMover;
@@ -8050,7 +8054,7 @@ public:
                         candidate.mover || candidate.orbUsed) return ibcore::Verdict::Partial;
                     safe = candidate.end == SimEnd::Survived &&
                            candidate.ticks >= recoveryHorizon &&
-                           candidate.clear >= clearTarget(mode.name()) + 0.75f;
+                           candidate.clearAll >= clearTarget(mode.name()) + 0.75f;
                     return safe ? ibcore::Verdict::Good : ibcore::Verdict::Bad;
                 };
 
