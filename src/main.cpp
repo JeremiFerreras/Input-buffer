@@ -11137,15 +11137,15 @@ class MicroCancelReplayHarness {
         s_killerId = -1;
         s_killerX = s_killerY = 0.f;
         s_sim.qaBeginReplay(job.profile);
+        s_jobRunning = true;
         if (s_trace.is_open()) s_trace.close();
         s_trace.open(makeLevelPath(), std::ios::out | std::ios::trunc);
         if (!s_trace.is_open()) {
             requestFinish("trace_open_failed", PlayLayer::get(), nullptr);
-            finalizeCurrentJob();
+            finalizeCurrentJob(PlayLayer::get());
             return;
         }
         s_trace << "job,group,profile,step,half,last,dt,x,y,y_vel,mode,upside,size,speed,on_ground,dead,physical_held,game_held,latch_pending,latch_released,mc_arms,mc_releases,mc_swallowed_keyups,mc_cancelled,mc_last_plan_ticks,mc_expected_press_at,mc_actual_press_at,mc_press_error_ticks\n";
-        s_jobRunning = true;
         log::info("[MicroCancelQA] job={} group={} profile={} inputs={} max_steps={}",
                   job.name, job.group, job.profile, job.inputs.size(), job.maxSteps);
         Notification::create(
@@ -11178,7 +11178,10 @@ class MicroCancelReplayHarness {
         s_killerId = killer ? killer->m_objectID : -1;
         s_killerX = killer ? killer->getPositionX() : 0.f;
         s_killerY = killer ? killer->getPositionY() : 0.f;
-        (void)pl;
+        geode::queueInMainThread([pl] {
+            if (s_jobRunning && s_finishPending && PlayLayer::get() == pl)
+                finalizeCurrentJob(pl);
+        });
     }
 
     static void finalizeCurrentJob(PlayLayer* pl = nullptr) {
@@ -11201,7 +11204,6 @@ class MicroCancelReplayHarness {
             s_results.flush();
         }
         if (s_trace.is_open()) {
-            writeTrace(pl, s_lastDt, false, true, s_step);
             s_trace.flush();
             s_trace.close();
         }
@@ -11290,6 +11292,10 @@ public:
                 return;
             }
             openResults();
+            if (!s_results.is_open()) {
+                abortBatch("could_not_open_results_csv");
+                return;
+            }
         }
         s_internalTransition = false;
         if (!s_jobRunning) beginCurrentJob();
@@ -11313,7 +11319,8 @@ public:
         if (!s_jobRunning || !pl) return;
         s_lastDt = dt;
         if (half) ++s_halfTicks;
-        writeTrace(pl, dt, half, last, s_step);
+        bool const finalStep = s_finishPending || (s_step + 1 >= s_jobs[s_jobIndex].maxSteps);
+        writeTrace(pl, dt, half, last || finalStep, s_step);
         ++s_step;
         if (s_finishPending) {
             finalizeCurrentJob(pl);
