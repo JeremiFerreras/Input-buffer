@@ -2236,6 +2236,9 @@ struct LogConsole {
             SetConsoleCursorPosition(s_out, home);
         }
     }
+#else
+    // Non-Windows targets have no external console, but share the game-layer hook.
+    static void pump() {}
 #endif
 
     static bool available() {
@@ -2339,6 +2342,7 @@ struct LogConsole {
         int const wave = stage == 0 ? 0 : static_cast<int>(std::lround(STAGES[stage].w[W_WAVE] / BASE_DT));
         preset(0.f, stage, all, wave);
         event(0.f, "READY", "F6  CHANGE PRESET   |   F7  HIDE CONSOLE", COL_GREEN);
+        pump(); // flush the first two startup rows immediately
         return true;
 #else
         return false;
@@ -6591,6 +6595,7 @@ public:
     void reportMicroCancelStatus() {
         pushLog(fmt::format("NOTE: EXPERIMENTAL MICRO-CANCEL {}. OFF at every launch; F9 cycles OFF / 1T / 2T / 3T. One verified release only; never auto-presses.",
                             ibcore::microCancelProfileName(m_microCancelLevel)), COL_YELLOW, false);
+        LogConsole::pump(); // surface the startup/current mode notice immediately
     }
 
     void cycleMicroCancel() {
@@ -7989,7 +7994,7 @@ public:
         n.d = dec;
         n.us = usedUs + microProbeUs;
         n.r0 = r0;
-        n.delay = bestDelay;
+        n.delay = dec == Decision::MicroCanceled ? microCancelTicks : bestDelay;
         n.evals = evals;
         n.orb = viaOrb;
         n.needed = needed;
