@@ -184,7 +184,10 @@ class VideoProfileTests(unittest.TestCase):
         self.assertIn("testWaveSpamMicroSave", sim)
         self.assertIn("testStraightShipMicroSave", sim)
         self.assertIn("testNeverCancelsWithoutProof", sim)
-        self.assertIn("exactly one press and one release", sim)
+        self.assertIn("saved.manualPresses == 1", sim)
+        self.assertIn("saved.releases == 1", sim)
+        self.assertIn("releaseOnly.died", sim)
+        self.assertIn("the mod must not keep pressing for the player", sim)
 
     def test_experimental_micro_cancel_starts_disabled(self):
         self.assertIn('"micro-cancel-cycle-key"', MOD["settings"])
@@ -199,6 +202,8 @@ class VideoProfileTests(unittest.TestCase):
         self.assertIn("candidate.end != SimEnd::Survived", SOURCE)
         self.assertIn("candidate.ticks < recoveryHorizon", SOURCE)
         self.assertIn("int const recoveryTicks = scaleTicks(3, s);", SOURCE)
+        self.assertIn("SimResult const candidate = sim(0, oneShot, recoveryHorizon);", SOURCE)
+        self.assertIn("gridStart + static_cast<double>(chosenReleaseStep) * dt", SOURCE)
         self.assertIn("candidate.clear < clearTarget(mode.name()) + 0.75f", SOURCE)
         self.assertIn("pump(); // flush the first two startup rows immediately", SOURCE)
         self.assertIn("LogConsole::pump(); // surface the startup/current mode notice immediately", SOURCE)

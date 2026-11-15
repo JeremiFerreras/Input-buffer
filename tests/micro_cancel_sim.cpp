@@ -104,6 +104,8 @@ void testWaveSpamMicroSave() {
                                    -1, humanPressAt);
     auto saved = simulate(Model::WaveSpam, 14.0, 0.0, plan.releaseAfterTicks, false,
                           humanPressAt, humanPressAt + 4);
+    auto releaseOnly = simulate(Model::WaveSpam, 14.0, 0.0, plan.releaseAfterTicks, false, -1, 12);
+    check(releaseOnly.died, "without a manual follow-up, the mod must not keep pressing for the player");
     check(!recoveryWindow.died && !saved.died && saved.releases == 1 &&
           saved.manualPresses == 1 && saved.presses == 2,
           "wave must allow a human follow-up after exactly one automatic release");
@@ -124,6 +126,8 @@ void testStraightShipMicroSave() {
                                    -1, humanPressAt);
     auto saved = simulate(Model::StraightShip, 14.0, 0.0, plan.releaseAfterTicks, false,
                           humanPressAt, humanPressAt + 4);
+    auto releaseOnly = simulate(Model::StraightShip, 14.0, 0.0, plan.releaseAfterTicks, false, -1, 12);
+    check(releaseOnly.died, "without a manual follow-up, the mod must not keep pressing for the player");
     check(!recoveryWindow.died && !saved.died && saved.releases == 1 &&
           saved.manualPresses == 1 && saved.presses == 2,
           "straight ship must allow a human follow-up after one automatic release");

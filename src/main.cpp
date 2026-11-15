@@ -7969,7 +7969,10 @@ public:
             m_recordPath = oldRecordPath;
             m_hasDeadline = oldHasDeadline;
             m_deadline = oldDeadline;
-            if (plan && m_microCancelLatch.arm(m_gameTime + static_cast<double>(scaleTicks(plan.releaseAfterTicks, s)) * dt)) {
+            int const chosenReleaseStep = scaleTicks(plan.releaseAfterTicks, s);
+            double const gridStart = m_gameTime - static_cast<double>(tickPhase()) * dt;
+            double const releaseAt = gridStart + static_cast<double>(chosenReleaseStep) * dt;
+            if (plan && m_microCancelLatch.arm(std::max(m_gameTime, releaseAt))) {
                 microCancelTicks = plan.releaseAfterTicks;
                 m_microCancelModeCode = modeCode(p1);
                 m_microCancelReleaseTicks = microCancelTicks;
