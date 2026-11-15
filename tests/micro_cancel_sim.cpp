@@ -136,13 +136,13 @@ void testWaveSpamMicroSave() {
     auto baseline = simulate(Model::WaveSpam, 14.0, 0.0, -1, -1, -1, horizon);
     check(baseline.died, "wave held baseline should die while rising");
 
-    auto plan = planMicroCancel(waveGate(), [&](int releaseAt) {
+    auto plan = planMicroCancelMinimal(waveGate(), [&](int releaseAt) {
         if (releaseAt >= tapTicks) return Verdict::Bad;
         auto recovery = recoveryAt(Model::WaveSpam, 14.0, 0.0, releaseAt,
                                    naturalPressAt, jitter, tapTicks, horizon);
         return recovery.robust() ? Verdict::Good : Verdict::Bad;
     });
-    check(plan.releaseAfterTicks == 1, "wave should choose the earliest robust one-tick release");
+    check(plan.releaseAfterTicks == 2, "wave should choose the latest robust release without losing recovery margin");
 
     auto saved = simulate(Model::WaveSpam, 14.0, 0.0, plan.releaseAfterTicks,
                           naturalPressAt, naturalPressAt + tapTicks, horizon);
@@ -163,7 +163,7 @@ void testStraightShipMicroSave() {
     auto baseline = simulate(Model::StraightShip, 20.5, 0.0, -1, -1, -1, horizon);
     check(baseline.died, "straight-ship held baseline should die");
 
-    auto plan = planMicroCancel(shipGate(), [&](int releaseAt) {
+    auto plan = planMicroCancelMinimal(shipGate(), [&](int releaseAt) {
         if (releaseAt >= tapTicks) return Verdict::Bad;
         auto recovery = recoveryAt(Model::StraightShip, 20.5, 0.0, releaseAt,
                                    naturalPressAt, jitter, tapTicks, horizon);
