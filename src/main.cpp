@@ -2466,6 +2466,7 @@ class TrajectoryBufferSim {
     // Experimental micro-cancel is session-only and always starts OFF.
     int m_microCancelLevel = static_cast<int>(ibcore::MicroCancelProfile::Off);
     int m_microCancelModeCode = -1;
+    int m_microCancelRhythmWindow = -1;
     int m_microCancelReleaseTicks = 0;
     ibcore::MicroCancelLatch m_microCancelLatch;
 
@@ -4642,6 +4643,7 @@ private:
         m_queue.clear();
         if (m_microCancelLatch.cancelPending()) {
             m_microCancelModeCode = -1;
+            m_microCancelRhythmWindow = -1;
             m_microCancelReleaseTicks = 0;
         }
         m_live = false;
@@ -4851,6 +4853,7 @@ public:
         clearBuffer();
         m_microCancelLatch.reset();
         m_microCancelModeCode = -1;
+        m_microCancelRhythmWindow = -1;
         m_microCancelReleaseTicks = 0;
         m_physicalHolding = false;
         m_pendingSinceWall = Clock::time_point{};
@@ -6043,6 +6046,7 @@ public:
         m_gameHolding = false;
         m_microCancelLatch.reset();
         m_microCancelModeCode = -1;
+        m_microCancelRhythmWindow = -1;
         m_microCancelReleaseTicks = 0;
         m_lastInputTime = -1e9;
         m_streamLast = -1e9;
@@ -6622,6 +6626,7 @@ public:
         if (m_microCancelLevel == static_cast<int>(ibcore::MicroCancelProfile::Off)) {
             if (m_microCancelLatch.cancelPending()) {
                 m_microCancelModeCode = -1;
+                m_microCancelRhythmWindow = -1;
                 m_microCancelReleaseTicks = 0;
             }
         }
@@ -7316,6 +7321,7 @@ public:
 
         if (!push && m_microCancelLatch.cancelPending()) {
             m_microCancelModeCode = -1;
+            m_microCancelRhythmWindow = -1;
             m_microCancelReleaseTicks = 0;
         }
         if (!push && m_microCancelLatch.consumePhysicalRelease()) {
@@ -7326,7 +7332,9 @@ public:
             if (releasePlayer) {
                 ModeInfo releaseMode;
                 releaseMode.add(releasePlayer);
-                WinIdx const releaseWindow = primaryWin(releaseMode, true);
+                int const savedWindow = m_microCancelRhythmWindow;
+                int const releaseWindow = (savedWindow >= 0 && savedWindow < W_COUNT)
+                    ? savedWindow : static_cast<int>(primaryWin(releaseMode, true));
                 if (m_lastPressAt >= 0.0) {
                     double const hold = m_gameTime - m_lastPressAt;
                     if (hold > 0.0 && hold < 60.0)
@@ -7341,6 +7349,7 @@ public:
             m_physicalHolding = false;
             m_inputsSeen++;
             m_microCancelModeCode = -1;
+            m_microCancelRhythmWindow = -1;
             m_microCancelReleaseTicks = 0;
             return false;
         }
@@ -8064,6 +8073,7 @@ public:
                 releaseAt + TIME_EPS >= m_gameTime && m_microCancelLatch.arm(releaseAt)) {
                 microCancelTicks = plan.releaseAfterTicks;
                 m_microCancelModeCode = modeCode(p1);
+                m_microCancelRhythmWindow = static_cast<int>(microRhythmWindow);
                 m_microCancelReleaseTicks = microCancelTicks;
                 dec = Decision::MicroCanceled;
             }
@@ -8514,6 +8524,7 @@ public:
             // scheduled release and its pending physical-keyup swallow.
             m_microCancelLatch.reset();
             m_microCancelModeCode = -1;
+            m_microCancelRhythmWindow = -1;
             m_microCancelReleaseTicks = 0;
             if (!m_deathReported) onRealDeath();
             return;
@@ -8538,6 +8549,7 @@ public:
         if (m_microCancelLatch.pending() && modeCode(player) != m_microCancelModeCode) {
             m_microCancelLatch.cancelPending();
             m_microCancelModeCode = -1;
+            m_microCancelRhythmWindow = -1;
             m_microCancelReleaseTicks = 0;
         }
         if (m_microCancelLatch.process(m_gameTime, m_physicalHolding, m_gameHolding, TIME_EPS)) {
@@ -8550,7 +8562,8 @@ public:
             m_streak = 0;
             m_streamShift = 0.0;
             fireButton(pl, false);
-            m_microCancelModeCode = -1;
+            // Keep the original mode/rhythm context until the physical key-up
+            // is consumed; a portal may have changed the live gamemode meanwhile.
             m_microCancelReleaseTicks = 0;
             pushLog(fmt::format("NOTE: EXPERIMENTAL MICRO-CANCEL sent one release after {} base tick(s); no re-press was generated.",
                                 releasedAfter), COL_YELLOW, false);
