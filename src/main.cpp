@@ -8011,7 +8011,7 @@ public:
             m_hasDeadline = true;
             auto const microStart = Clock::now();
             m_deadline = microStart + std::chrono::microseconds(microBudgetUs);
-            auto const plan = ibcore::planMicroCancel(microGate, [&](int baseTicks) {
+            auto const plan = ibcore::planMicroCancelMinimal(microGate, [&](int baseTicks) {
                 int const releaseStep = scaleTicks(baseTicks, s);
                 // The player must still be physically holding the original tap
                 // when the synthetic release is due. If their normal key-up
