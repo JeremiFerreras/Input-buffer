@@ -25,6 +25,11 @@ jobs:
       - name: Run core unit tests
         run: ./core_tests
 
+      - name: Compile and run experimental GD-inspired micro-cancel simulations
+        run: |
+          g++ -std=c++20 -O2 -Wall -Wextra -I src tests/micro_cancel_sim.cpp -o micro_cancel_sim
+          ./micro_cancel_sim
+
       - name: Run stress tests with AddressSanitizer and UndefinedBehaviorSanitizer
         run: |
           g++ -std=c++20 -O1 -g -Wall -Wextra -D_GLIBCXX_ASSERTIONS -fno-omit-frame-pointer -fsanitize=address,undefined -I src tests/core_tests.cpp -o core_tests_sanitized

@@ -332,6 +332,139 @@ private:
 };
 
 // ----------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
+//  Experimental micro-cancel (one-shot release only; never creates a press)
+// ----------------------------------------------------------------------------
+enum class MicroCancelProfile : uint8_t {
+    Off = 0,
+    OneTick = 1,
+    TwoTicks = 2,
+    ThreeTicks = 3
+};
+
+inline int microCancelMaxTicks(int profile) {
+    return std::clamp(profile, 0, 3);
+}
+
+inline int nextMicroCancelProfile(int profile) {
+    return (microCancelMaxTicks(profile) + 1) % 4;
+}
+
+inline char const* microCancelProfileName(int profile) {
+    switch (microCancelMaxTicks(profile)) {
+        case 1: return "1 TICK";
+        case 2: return "2 TICKS";
+        case 3: return "3 TICKS";
+        default: return "OFF";
+    }
+}
+
+struct MicroCancelGate {
+    bool enabled = false;
+    bool press = false;
+    bool wave = false;
+    bool ship = false;
+    bool waveSpam = false;
+    bool straightFlight = false;
+    bool dual = false;
+    bool queueActive = false;
+    bool alreadyHolding = false;
+    bool baselineDied = false;
+    bool baselineTruncated = false;
+    bool baselineBudget = false;
+    int maxTicks = 0;
+};
+
+inline bool microCancelEligible(MicroCancelGate const& g) {
+    if (!g.enabled || !g.press || g.dual || g.queueActive || g.alreadyHolding ||
+        !g.baselineDied || g.baselineTruncated || g.baselineBudget || g.maxTicks <= 0) {
+        return false;
+    }
+    bool const waveSpam = g.wave && !g.ship && g.waveSpam;
+    bool const straightShip = g.ship && !g.wave && g.straightFlight;
+    return waveSpam || straightShip;
+}
+
+struct MicroCancelPlan {
+    int releaseAfterTicks = 0;
+    int evals = 0;
+    explicit operator bool() const { return releaseAfterTicks > 0; }
+};
+
+// Eval returns Verdict for a path with one release inserted at the requested tick.
+// Only Good can authorize an action. Partial (unknown geometry) and Budget
+// fail closed immediately instead of trying another guess.
+template <class Eval>
+MicroCancelPlan planMicroCancel(MicroCancelGate const& gate, Eval&& eval) {
+    MicroCancelPlan out;
+    if (!microCancelEligible(gate)) return out;
+    int const limit = std::clamp(gate.maxTicks, 1, 3);
+    for (int ticks = 1; ticks <= limit; ++ticks) {
+        Verdict const result = eval(ticks);
+        ++out.evals;
+        if (result == Verdict::Good) {
+            out.releaseAfterTicks = ticks;
+            return out;
+        }
+        if (result == Verdict::Partial || result == Verdict::Budget) return out;
+    }
+    return out;
+}
+
+// Runtime latch: after one automatic release, swallow exactly one matching
+// physical key-up. If the user releases first, cancel the pending release and
+// let their real key-up pass through. No API here can synthesize a press.
+class MicroCancelLatch {
+public:
+    bool arm(double dueAt) {
+        if (m_pending || m_released || !std::isfinite(dueAt)) return false;
+        m_dueAt = dueAt;
+        m_pending = true;
+        return true;
+    }
+
+    bool process(double now, bool physicalHeld, bool gameHeld, double eps = 1e-6) {
+        if (!m_pending) return false;
+        if (!physicalHeld || !gameHeld) {
+            cancelPending();
+            return false;
+        }
+        if (now + eps < m_dueAt) return false;
+        m_pending = false;
+        m_dueAt = -1.0;
+        m_released = true;
+        return true;
+    }
+
+    bool cancelPending() {
+        if (!m_pending) return false;
+        m_pending = false;
+        m_dueAt = -1.0;
+        return true;
+    }
+
+    bool consumePhysicalRelease() {
+        if (!m_released) return false;
+        m_released = false;
+        return true;
+    }
+
+    bool pending() const { return m_pending; }
+    bool released() const { return m_released; }
+    double dueAt() const { return m_pending ? m_dueAt : -1.0; }
+
+    void reset() {
+        m_pending = false;
+        m_released = false;
+        m_dueAt = -1.0;
+    }
+
+private:
+    bool m_pending = false;
+    bool m_released = false;
+    double m_dueAt = -1.0;
+};
+
 //  Prediction tracker (live accuracy)
 //
 //  After a click is let through or buffered, the sim's predicted path for it

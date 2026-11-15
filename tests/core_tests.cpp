@@ -9,6 +9,7 @@
 
 #include <cstdio>
 #include <functional>
+#include <limits>
 #include <map>
 #include <random>
 #include <string>
@@ -1130,6 +1131,104 @@ static void testSearchStress() {
     }
 }
 
+static void testMicroCancelCore() {
+    std::printf("[experimental micro-cancel gate/search/latch]\n");
+    CHECK(microCancelMaxTicks(-5) == 0 && microCancelMaxTicks(99) == 3,
+          "profile clamp failed");
+    CHECK(nextMicroCancelProfile(0) == 1 && nextMicroCancelProfile(1) == 2 &&
+          nextMicroCancelProfile(2) == 3 && nextMicroCancelProfile(3) == 0,
+          "profile must cycle OFF / 1 / 2 / 3 / OFF");
+    CHECK(std::string(microCancelProfileName(0)) == "OFF" &&
+          std::string(microCancelProfileName(3)) == "3 TICKS", "profile labels");
+
+    MicroCancelGate wave;
+    wave.enabled = true;
+    wave.press = true;
+    wave.wave = true;
+    wave.waveSpam = true;
+    wave.maxTicks = 3;
+    CHECK(microCancelEligible(wave), "wave spam gate rejected eligible press");
+    MicroCancelGate ship = wave;
+    ship.wave = false;
+    ship.ship = true;
+    ship.waveSpam = false;
+    ship.straightFlight = true;
+    CHECK(microCancelEligible(ship), "straight-ship gate rejected eligible press");
+
+    MicroCancelGate rejected = wave;
+    rejected.enabled = false;
+    CHECK(!microCancelEligible(rejected), "disabled mode must be raw");
+    rejected = wave; rejected.press = false;
+    CHECK(!microCancelEligible(rejected), "release cannot start micro-cancel");
+    rejected = wave; rejected.waveSpam = false;
+    CHECK(!microCancelEligible(rejected), "non-spam wave must not qualify");
+    rejected = ship; rejected.straightFlight = false;
+    CHECK(!microCancelEligible(rejected), "non-straight ship must not qualify");
+    rejected = wave; rejected.dual = true;
+    CHECK(!microCancelEligible(rejected), "dual mode must fail closed");
+    rejected = wave; rejected.queueActive = true;
+    CHECK(!microCancelEligible(rejected), "active queue must fail closed");
+    rejected = wave; rejected.alreadyHolding = true;
+    CHECK(!microCancelEligible(rejected), "already-held input cannot arm");
+    rejected = wave; rejected.baselineDied = false;
+    CHECK(!microCancelEligible(rejected), "baseline-safe input must not be touched");
+    rejected = wave; rejected.baselineTruncated = true;
+    CHECK(!microCancelEligible(rejected), "truncated baseline must fail closed");
+    rejected = wave; rejected.baselineBudget = true;
+    CHECK(!microCancelEligible(rejected), "budget baseline must fail closed");
+
+    std::vector<int> tested;
+    auto const plan = planMicroCancel(wave, [&](int ticks) {
+        tested.push_back(ticks);
+        return ticks == 2 ? Verdict::Good : Verdict::Bad;
+    });
+    CHECK(plan.releaseAfterTicks == 2 && plan.evals == 2,
+          "expected earliest confirmed release at 2, got %d after %d evals",
+          plan.releaseAfterTicks, plan.evals);
+    CHECK(tested.size() == 2 && tested[0] == 1 && tested[1] == 2,
+          "candidate order should be 1 then 2");
+    wave.maxTicks = 1;
+    auto none = planMicroCancel(wave, [](int) { return Verdict::Bad; });
+    CHECK(!none && none.evals == 1, "one-tick profile exceeded its limit");
+
+    for (Verdict unknown : {Verdict::Partial, Verdict::Budget}) {
+        wave.maxTicks = 3;
+        int calls = 0;
+        auto failClosed = planMicroCancel(wave, [&](int) {
+            ++calls;
+            return unknown;
+        });
+        CHECK(!failClosed && failClosed.evals == 1 && calls == 1,
+              "unknown result must stop immediately");
+    }
+
+    MicroCancelLatch latch;
+    CHECK(!latch.arm(std::numeric_limits<double>::quiet_NaN()), "NaN due time accepted");
+    CHECK(latch.arm(10.0), "latch did not arm");
+    CHECK(!latch.arm(11.0), "second pending cancel armed");
+    CHECK(!latch.process(9.999, true, true), "release fired early");
+    CHECK(latch.pending(), "early poll should preserve pending state");
+    CHECK(latch.cancelPending(), "natural user release failed to cancel");
+    CHECK(!latch.process(10.0, true, true), "cancelled release fired");
+    CHECK(!latch.released() && !latch.consumePhysicalRelease(),
+          "cancelled release should not swallow the real key-up");
+
+    CHECK(latch.arm(20.0), "latch did not re-arm after cancellation");
+    CHECK(!latch.process(20.0, false, true), "released physical key must cancel");
+    CHECK(!latch.pending() && !latch.released(), "physical-up cancellation state");
+
+    CHECK(latch.arm(30.0), "latch did not arm for one-shot release");
+    CHECK(latch.process(30.0, true, true), "due release did not fire");
+    CHECK(latch.released() && !latch.pending(), "release must latch until physical key-up");
+    CHECK(!latch.process(31.0, true, true), "automatic release repeated");
+    CHECK(!latch.arm(32.0), "second release armed before physical key-up");
+    CHECK(latch.consumePhysicalRelease(), "real key-up after auto-release not consumed");
+    CHECK(!latch.consumePhysicalRelease(), "physical key-up consumed more than once");
+    CHECK(latch.arm(40.0), "fresh press cannot arm after old key-up was consumed");
+    latch.reset();
+    CHECK(!latch.pending() && !latch.released(), "reset must clear all latch state");
+}
+
 static void testPushAt() {
     std::printf("[pushAt]\n");
     InputQueue q;
@@ -1155,6 +1254,7 @@ static void testPushAt() {
 }
 
 int main() {
+    testMicroCancelCore();
     testQueueCapacity();
     testQueueStress();
     testSearchStress();

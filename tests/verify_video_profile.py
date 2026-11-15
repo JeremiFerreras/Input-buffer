@@ -162,6 +162,26 @@ class VideoProfileTests(unittest.TestCase):
             self.assertIn(required, overflow_branch)
         self.assertIn("m_queueOverflowReported = false;", SOURCE)
 
+    def test_experimental_micro_cancel_core_is_bounded_and_one_shot(self):
+        core = CORE[CORE.index("enum class MicroCancelProfile"):CORE.index("//  Prediction tracker")]
+        self.assertIn("ThreeTicks = 3", core)
+        self.assertIn("return (microCancelMaxTicks(profile) + 1) % 4", core)
+        self.assertIn("if (result == Verdict::Partial || result == Verdict::Budget) return out;", core)
+        self.assertIn("bool consumePhysicalRelease()", core)
+        self.assertIn("bool process(double now, bool physicalHeld, bool gameHeld", core)
+        self.assertNotIn("pushButton", core)
+        sim = (ROOT / "tests" / "micro_cancel_sim.cpp").read_text(encoding="utf-8")
+        self.assertIn("testWaveSpamMicroSave", sim)
+        self.assertIn("testStraightShipMicroSave", sim)
+        self.assertIn("testNeverCancelsWithoutProof", sim)
+        self.assertIn("exactly one press and one release", sim)
+
+    def test_experimental_micro_cancel_starts_disabled(self):
+        self.assertIn('"micro-cancel-cycle-key"', MOD["settings"])
+        self.assertEqual(MOD["settings"]["micro-cancel-cycle-key"]["default"], "F9")
+        self.assertIn("MicroCancelProfile::Off", SOURCE)
+        self.assertIn("EXPERIMENTAL MICRO-CANCEL", SOURCE)
+
     def test_f6_cycles_five_modes_then_wraps(self):
         self.assertIn("int const next = (cur == STAGE_COUNT - 1) ? 0 : cur + 1;", SOURCE)
         self.assertEqual(MOD["settings"]["stage"]["one-of"], ["Off", "Stage 1", "Stage 2", "Stage 3", "Stage 4"])
