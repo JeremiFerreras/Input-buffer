@@ -430,6 +430,26 @@ MicroCancelPlan planMicroCancel(MicroCancelGate const& gate, Eval&& eval) {
     return out;
 }
 
+// Prefer the latest proven release, because it changes the player's physical
+// hold for the shortest possible time. This is intentionally separate from
+// planMicroCancel(), whose earliest-first policy remains available unchanged.
+template <class Eval>
+MicroCancelPlan planMicroCancelMinimal(MicroCancelGate const& gate, Eval&& eval) {
+    MicroCancelPlan out;
+    if (!microCancelEligible(gate)) return out;
+    int const limit = std::clamp(gate.maxTicks, 1, 3);
+    for (int ticks = limit; ticks >= 1; --ticks) {
+        Verdict const result = eval(ticks);
+        ++out.evals;
+        if (result == Verdict::Good) {
+            out.releaseAfterTicks = ticks;
+            return out;
+        }
+        if (result == Verdict::Partial || result == Verdict::Budget) return out;
+    }
+    return out;
+}
+
 // Runtime latch: after one automatic release, swallow exactly one matching
 // physical key-up. If the user releases first, cancel the pending release and
 // let their real key-up pass through. No API here can synthesize a press.
