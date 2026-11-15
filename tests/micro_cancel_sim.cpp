@@ -61,7 +61,10 @@ PathResult simulate(Model model, double startY, double startVy,
         if (model == Model::WaveSpam) {
             vy = held ? 2.0 : -2.0;
         } else {
-            vy += held ? 0.8 : -0.8;
+            // Deliberately gentle ship acceleration in this corridor fixture:
+            // it creates a held-path ceiling death while allowing a short
+            // release followed by the user's ordinary tap to recover.
+            vy += held ? 0.4 : -0.4;
             vy = std::clamp(vy, -3.0, 3.0);
         }
         y += vy;
