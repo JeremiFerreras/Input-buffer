@@ -202,6 +202,68 @@ void testNeverCancelsWithoutProof() {
     check(!microCancelEligible(gate), "ordinary non-spam wave input must not arm");
 }
 
+void testEligibilityTruthTable() {
+    for (unsigned mask = 0; mask < (1u << 11); ++mask) {
+        MicroCancelGate g;
+        g.enabled = (mask & (1u << 0)) != 0;
+        g.press = (mask & (1u << 1)) != 0;
+        g.wave = (mask & (1u << 2)) != 0;
+        g.ship = (mask & (1u << 3)) != 0;
+        g.waveSpam = (mask & (1u << 4)) != 0;
+        g.straightFlight = (mask & (1u << 5)) != 0;
+        g.dual = (mask & (1u << 6)) != 0;
+        g.queueActive = (mask & (1u << 7)) != 0;
+        g.alreadyHolding = (mask & (1u << 8)) != 0;
+        g.baselineDied = (mask & (1u << 9)) != 0;
+        g.baselineTruncated = (mask & (1u << 10)) != 0;
+        g.baselineBudget = false;
+        g.maxTicks = 3;
+        bool const expected = g.enabled && g.press && !g.dual && !g.queueActive &&
+            !g.alreadyHolding && g.baselineDied && !g.baselineTruncated &&
+            ((g.wave && !g.ship && g.waveSpam) || (g.ship && !g.wave && g.straightFlight));
+        check(microCancelEligible(g) == expected,
+              "eligibility gate matches Wave/straight-Ship truth table");
+    }
+}
+
+void testLatchDeterministicLifecycleFuzz() {
+    // Fixed-seed xorshift; every run is deterministic and reproducible.
+    uint32_t seed = 0x91E10DA5u;
+    auto next = [&]() -> uint32_t {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        return seed;
+    };
+
+    MicroCancelLatch latch;
+    for (int i = 0; i < 5000; ++i) {
+        latch.reset();
+        double const due = 0.01 + static_cast<double>(next() % 100000u) / 10000.0;
+        check(latch.arm(due), "fuzz cycle arms a finite deadline");
+        check(!latch.process(due * 0.5, true, true), "fuzz cycle cannot release early");
+        check(latch.pending(), "early poll keeps latch pending");
+        check(latch.process(due, true, true), "fuzz cycle releases at exact deadline");
+        check(!latch.pending() && latch.released(), "release enters one-shot released state");
+        check(!latch.process(due + 1.0, true, true), "released latch cannot emit another release");
+        check(latch.consumePhysicalRelease(), "one physical key-up is consumed");
+        check(!latch.consumePhysicalRelease(), "second physical key-up is not swallowed");
+        check(!latch.pending() && !latch.released(), "successful cycle returns to idle");
+    }
+
+    for (int i = 0; i < 2000; ++i) {
+        latch.reset();
+        double const due = 0.1 + static_cast<double>(next() % 10000u) / 1000.0;
+        check(latch.arm(due), "cancel fuzz cycle arms");
+        check(!latch.process(due * 0.5, false, true),
+              "physical release before deadline cancels the automatic release");
+        check(!latch.pending() && !latch.released(),
+              "early physical release leaves no stale latch");
+        check(!latch.consumePhysicalRelease(),
+              "cancelled event cannot swallow unrelated future key-up");
+    }
+}
+
 void testLatchRejectsInvalidClockAndConsumesOnce() {
     MicroCancelLatch latch;
     check(latch.arm(2.0), "valid release time arms");
@@ -225,6 +287,8 @@ int main() {
     testWaveSpamMicroSave();
     testStraightShipMicroSave();
     testNeverCancelsWithoutProof();
+    testEligibilityTruthTable();
+    testLatchDeterministicLifecycleFuzz();
     testLatchRejectsInvalidClockAndConsumesOnce();
     std::printf("Phase 2 micro-cancel checks: %d assertions, %d failures\n", assertions, failures);
     return failures ? 1 : 0;

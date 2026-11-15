@@ -10964,10 +10964,12 @@ class MicroCancelReplayHarness {
     };
     struct JobResult {
         std::string name, group, status;
-        int profile = 0;
-        int steps = 0, halfTicks = 0, injected = 0, lastPlanTicks = 0, lastDecision = 0;
+        int profile = 0, maxSteps = 0, steps = 0, halfTicks = 0;
+        int injected = 0, inputEvents = 0, lastPlanTicks = 0, lastDecision = 0;
         long long arms = 0, releases = 0, swallowed = 0, cancelled = 0;
-        bool pending = false, released = false;
+        bool pending = false, released = false, awaitingManualPress = false;
+        bool physicalHeld = false, gameHeld = false, inputTapeComplete = false;
+        double expectedPressAt = -1.0, actualPressAt = -1.0, pressErrorTicks = -999.0;
     };
 
     static inline std::vector<Job> s_jobs;
@@ -10988,6 +10990,7 @@ class MicroCancelReplayHarness {
     static inline std::string s_levelString;
     static inline std::string s_levelName;
     static inline int s_songId = 0, s_audioTrack = 0;
+    static inline GJLevelType s_levelType = GJLevelType::Editor;
     static inline std::filesystem::path s_dir, s_jobsRunningPath;
     static inline std::ofstream s_trace;
     static inline std::ofstream s_results;
@@ -11061,9 +11064,10 @@ class MicroCancelReplayHarness {
 
         std::map<std::string, std::vector<std::pair<int, bool>>> groupTape;
         std::map<std::string, std::set<int>> groupProfiles;
+        std::map<std::string, int> groupMaxSteps;
         for (auto const& job : out) {
-            if (job.inputs.size() < 2 || !job.inputs.front().down) {
-                error = fmt::format("{} must start with a press and contain press/release events", job.name);
+            if (job.inputs.size() < 4 || !job.inputs.front().down) {
+                error = fmt::format("{} must include a press/release and a later manual press/release", job.name);
                 return false;
             }
             bool wantDown = true;
@@ -11089,6 +11093,11 @@ class MicroCancelReplayHarness {
             auto [it, inserted] = groupTape.emplace(job.group, signature);
             if (!inserted && it->second != signature) {
                 error = fmt::format("jobs in group '{}' do not use identical input tapes", job.group);
+                return false;
+            }
+            auto [stepIt, stepInserted] = groupMaxSteps.emplace(job.group, job.maxSteps);
+            if (!stepInserted && stepIt->second != job.maxSteps) {
+                error = fmt::format("jobs in group '{}' must use the same max_steps", job.group);
                 return false;
             }
             if (!groupProfiles[job.group].insert(job.profile).second) {
@@ -11127,16 +11136,17 @@ class MicroCancelReplayHarness {
         level->m_levelName = s_levelName;
         level->m_songID = s_songId;
         level->m_audioTrack = s_audioTrack;
-        level->m_levelType = GJLevelType::Editor;
+        level->m_levelType = s_levelType;
         return level;
     }
 
     static void openResults() {
         auto path = s_dir / "out" / "results.csv";
-        bool fresh = !std::filesystem::exists(path);
-        s_results.open(path, std::ios::out | std::ios::app);
-        if (fresh && s_results.is_open()) {
-            s_results << "job,group,profile,status,steps,half_ticks,injected,x,y,killer_id,killer_x,killer_y,mc_arms,mc_releases,mc_swallowed_keyups,mc_cancelled,mc_last_plan_ticks,last_decision,mc_pending_at_end,mc_released_at_end,physical_held_at_end,game_held_at_end,expected_press_at,actual_press_at,press_error_ticks\n";
+        // Results belong to one replay batch. Old rows must never contaminate a comparison.
+        if (s_results.is_open()) s_results.close();
+        s_results.open(path, std::ios::out | std::ios::trunc);
+        if (s_results.is_open()) {
+            s_results << "job,group,profile,status,steps,half_ticks,injected,x,y,killer_id,killer_x,killer_y,mc_arms,mc_releases,mc_swallowed_keyups,mc_cancelled,mc_last_plan_ticks,last_decision,mc_pending_at_end,mc_released_at_end,physical_held_at_end,game_held_at_end,expected_press_at,actual_press_at,press_error_ticks,max_steps,input_events,input_tape_complete,awaiting_manual_press,followup_state\n";
         }
     }
 
@@ -11161,12 +11171,30 @@ class MicroCancelReplayHarness {
             finalizeCurrentJob(PlayLayer::get());
             return;
         }
-        s_trace << "job,group,profile,step,half,last,dt,x,y,y_vel,mode,decision,upside,size,speed,on_ground,dead,physical_held,game_held,latch_pending,latch_released,mc_arms,mc_releases,mc_swallowed_keyups,mc_cancelled,mc_last_plan_ticks,mc_expected_press_at,mc_actual_press_at,mc_press_error_ticks\n";
+        s_trace << "job,group,profile,step,half,last,dt,x,y,y_vel,mode,decision,upside,size,speed,on_ground,dead,physical_held,game_held,latch_pending,latch_released,mc_arms,mc_releases,mc_swallowed_keyups,mc_cancelled,mc_last_plan_ticks,mc_expected_press_at,mc_actual_press_at,mc_press_error_ticks,awaiting_manual_press,followup_state\n";
         log::info("[MicroCancelQA] job={} group={} profile={} inputs={} max_steps={}",
                   job.name, job.group, job.profile, job.inputs.size(), job.maxSteps);
         Notification::create(
             fmt::format("Micro-cancel replay: {} / F9 {}T", job.name, job.profile),
             NotificationIcon::Info, 2.f)->show();
+    }
+
+    static char const* followupState(bool awaitingManualPress, double expectedPressAt,
+                                     double actualPressAt, bool finished) {
+        if (actualPressAt >= 0.0 && !awaitingManualPress) return "OBSERVED";
+        if (awaitingManualPress) return finished ? "MISSING_MANUAL_PRESS" : "WAITING_MANUAL_PRESS";
+        if (expectedPressAt >= 0.0) return finished ? "MISSING_PHYSICAL_KEYUP" : "WAITING_PHYSICAL_KEYUP";
+        return "NOT_ARMED";
+    }
+
+    static bool followupVerified(JobResult const& result) {
+        return result.inputTapeComplete && result.expectedPressAt >= 0.0 &&
+               result.actualPressAt >= 0.0 && !result.awaitingManualPress &&
+               !result.physicalHeld && !result.gameHeld;
+    }
+
+    static bool validReplayStatus(std::string const& status) {
+        return status == "died" || status == "complete" || status == "timeout";
     }
 
     static void writeTrace(PlayLayer* pl, float dt, bool half, bool last, int step) {
@@ -11176,7 +11204,7 @@ class MicroCancelReplayHarness {
         double errTicks = -999.0;
         if (q.expectedPressAt >= 0.0 && q.actualPressAt >= 0.0 && q.tickLength > 0.0)
             errTicks = (q.actualPressAt - q.expectedPressAt) / q.tickLength;
-        s_trace << fmt::format("{},{},{},{},{},{},{:.6f},{:.4f},{:.4f},{:.6f},{},{},{},{:.3f},{:.3f},{},{},{},{},{},{},{},{},{},{},{},{:.6f},{:.6f},{:.3f}\n",
+        s_trace << fmt::format("{},{},{},{},{},{},{:.6f},{:.4f},{:.4f},{:.6f},{},{},{},{:.3f},{:.3f},{},{},{},{},{},{},{},{},{},{},{},{:.6f},{:.6f},{:.3f},{},{}\n",
             s_jobs[s_jobIndex].name, s_jobs[s_jobIndex].group, q.profile, step,
             half ? 1 : 0, last ? 1 : 0, dt, p->getPositionX(), p->getPositionY(),
             p->m_yVelocity, modeName(p), decisionName(static_cast<Decision>(q.lastDecision)),
@@ -11185,7 +11213,9 @@ class MicroCancelReplayHarness {
             p->m_isDead ? 1 : 0, q.physicalHeld ? 1 : 0, q.gameHeld ? 1 : 0,
             q.pending ? 1 : 0, q.released ? 1 : 0, q.arms, q.releases,
             q.swallowedKeyUps, q.cancelled, q.lastPlanTicks,
-            q.expectedPressAt, q.actualPressAt, errTicks);
+            q.expectedPressAt, q.actualPressAt, errTicks,
+            q.awaitingManualPress ? 1 : 0,
+            followupState(q.awaitingManualPress, q.expectedPressAt, q.actualPressAt, false));
     }
 
     static void requestFinish(std::string const& status, PlayLayer* pl, GameObject* killer) {
@@ -11205,44 +11235,87 @@ class MicroCancelReplayHarness {
         auto path = s_dir / "out" / "comparison.csv";
         std::ofstream out(path, std::ios::out | std::ios::trunc);
         if (!out.is_open()) return;
-        out << "group,profile,baseline_job,test_job,baseline_status,test_status,baseline_steps,test_steps,mc_arms,mc_releases,mc_swallowed_keyups,mc_cancelled,last_decision,intervention,outcome,latch_state\n";
-        int saves = 0, regressions = 0, notIntervened = 0, latchFlags = 0;
+        out << "group,profile,baseline_job,test_job,baseline_status,test_status,baseline_steps,test_steps,max_steps,input_events,input_tape_complete,mc_arms,mc_releases,mc_swallowed_keyups,mc_cancelled,awaiting_manual_press,followup_state,physical_held,game_held,expected_press_at,actual_press_at,press_error_ticks,last_decision,intervention,outcome,latch_state\n";
+        int saves = 0, regressions = 0, notIntervened = 0, latchFlags = 0, unverified = 0;
+
         for (auto const& test : s_jobResults) {
             if (test.profile == 0) continue;
             auto base = std::find_if(s_jobResults.begin(), s_jobResults.end(),
                 [&](JobResult const& r) { return r.group == test.group && r.profile == 0; });
             if (base == s_jobResults.end()) continue;
+
+            bool const comparable = validReplayStatus(base->status) &&
+                validReplayStatus(test.status) &&
+                base->maxSteps == test.maxSteps &&
+                base->inputEvents == test.inputEvents;
             bool const baseDied = base->status == "died";
             bool const testDied = test.status == "died";
+            bool const intervened = test.releases > 0;
+            bool const latchLeak = test.pending || test.released ||
+                test.releases > test.arms || test.swallowed > test.releases ||
+                test.physicalHeld || test.gameHeld;
+            std::string const latchState = latchLeak ? "CHECK_LATCH" : "CLEAN";
             std::string outcome;
-            if (baseDied && !testDied) { outcome = "SAVED"; ++saves; }
-            else if (!baseDied && testDied) { outcome = "REGRESSION"; ++regressions; }
-            else if (baseDied && testDied) {
+
+            if (!comparable) {
+                outcome = "NOT_COMPARABLE";
+            } else if (baseDied && testDied) {
                 if (test.steps < base->steps) outcome = "DIED_EARLIER";
                 else if (test.steps > base->steps) outcome = "DIED_LATER";
                 else outcome = "DIED_BOTH";
-            } else outcome = "NO_DEATH_BOTH";
+            } else if (!baseDied && testDied) {
+                outcome = "REGRESSION";
+                ++regressions;
+            } else if (baseDied && !testDied) {
+                if (!intervened) {
+                    outcome = "SURVIVED_NO_INTERVENTION";
+                    ++notIntervened;
+                } else if (!followupVerified(test)) {
+                    outcome = "SURVIVED_UNVERIFIED_FOLLOWUP";
+                    ++unverified;
+                } else if (latchLeak) {
+                    outcome = "SURVIVED_LATCH_WARNING";
+                    ++latchFlags;
+                } else if (test.status == "complete") {
+                    outcome = "SAVED_TO_COMPLETE";
+                    ++saves;
+                } else {
+                    outcome = "SAVED_TO_HORIZON";
+                    ++saves;
+                }
+            } else if (base->status == "complete" && test.status != "complete") {
+                outcome = "BASELINE_COMPLETED_TEST_INCOMPLETE";
+            } else if (base->status == "timeout" && test.status == "complete") {
+                outcome = "TEST_COMPLETED_BASELINE_TIMEOUT";
+            } else {
+                outcome = "NO_DEATH_BOTH";
+            }
 
-            bool const latchLeak = test.pending || test.released ||
-                test.releases > test.arms || test.swallowed > test.releases;
-            std::string const latchState = latchLeak ? "CHECK_LATCH" : "CLEAN";
-            if (latchLeak) ++latchFlags;
-            bool const intervened = test.releases > 0;
-            if (!intervened) { outcome += "_NO_INTERVENTION"; ++notIntervened; }
-            out << fmt::format("{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+            if (latchLeak && outcome != "NOT_COMPARABLE" && outcome.find("LATCH_WARNING") == std::string::npos) {
+                outcome += "_CHECK_LATCH";
+                ++latchFlags;
+            }
+            if (!intervened) outcome += "_NO_INTERVENTION";
+
+            out << fmt::format("{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.6f},{:.6f},{:.3f},{},{},{},{}\n",
                 test.group, test.profile, base->name, test.name, base->status,
-                test.status, base->steps, test.steps, test.arms, test.releases,
-                test.swallowed, test.cancelled,
+                test.status, base->steps, test.steps, test.maxSteps, test.inputEvents,
+                test.inputTapeComplete ? 1 : 0, test.arms, test.releases, test.swallowed,
+                test.cancelled, test.awaitingManualPress ? 1 : 0,
+                followupState(test.awaitingManualPress, test.expectedPressAt, test.actualPressAt, true),
+                test.physicalHeld ? 1 : 0, test.gameHeld ? 1 : 0,
+                test.expectedPressAt, test.actualPressAt, test.pressErrorTicks,
                 decisionName(static_cast<Decision>(test.lastDecision)),
                 intervened ? "YES" : "NO", outcome, latchState);
         }
         out.flush();
-        log::info("[MicroCancelQA] comparison: saves={} regressions={} no_intervention={} latch_flags={}",
-                  saves, regressions, notIntervened, latchFlags);
+        log::info("[MicroCancelQA] comparison: verified_saves={} regressions={} no_intervention={} unverified_followups={} latch_flags={}",
+                  saves, regressions, notIntervened, unverified, latchFlags);
         Notification::create(
-            fmt::format("Replay comparison: {} saves / {} regressions / {} no-intervention",
-                        saves, regressions, notIntervened),
-            regressions > 0 || latchFlags > 0 ? NotificationIcon::Warning : NotificationIcon::Success,
+            fmt::format("Replay QA: {} verified / {} regressions / {} unverified follow-ups",
+                        saves, regressions, unverified),
+            regressions > 0 || latchFlags > 0 || unverified > 0
+                ? NotificationIcon::Warning : NotificationIcon::Success,
             7.f)->show();
     }
 
@@ -11256,11 +11329,34 @@ class MicroCancelReplayHarness {
         if (q.expectedPressAt >= 0.0 && q.actualPressAt >= 0.0 && q.tickLength > 0.0)
             errTicks = (q.actualPressAt - q.expectedPressAt) / q.tickLength;
         Job const& job = s_jobs[s_jobIndex];
-        s_jobResults.push_back(JobResult{
-            job.name, job.group, s_finishStatus, job.profile, s_step, s_halfTicks,
-            s_injected, q.lastPlanTicks, q.lastDecision, q.arms, q.releases,
-            q.swallowedKeyUps, q.cancelled, q.pending, q.released
-        });
+        JobResult result;
+        result.name = job.name;
+        result.group = job.group;
+        result.status = s_finishStatus;
+        result.profile = job.profile;
+        result.maxSteps = job.maxSteps;
+        result.steps = s_step;
+        result.halfTicks = s_halfTicks;
+        result.injected = s_injected;
+        result.inputEvents = static_cast<int>(job.inputs.size());
+        result.inputTapeComplete = s_inputPos >= job.inputs.size() &&
+                                   s_injected >= static_cast<int>(job.inputs.size());
+        result.lastPlanTicks = q.lastPlanTicks;
+        result.lastDecision = q.lastDecision;
+        result.arms = q.arms;
+        result.releases = q.releases;
+        result.swallowed = q.swallowedKeyUps;
+        result.cancelled = q.cancelled;
+        result.pending = q.pending;
+        result.released = q.released;
+        result.awaitingManualPress = q.awaitingManualPress;
+        result.physicalHeld = q.physicalHeld;
+        result.gameHeld = q.gameHeld;
+        result.expectedPressAt = q.expectedPressAt;
+        result.actualPressAt = q.actualPressAt;
+        if (q.expectedPressAt >= 0.0 && q.actualPressAt >= 0.0 && q.tickLength > 0.0)
+            result.pressErrorTicks = (q.actualPressAt - q.expectedPressAt) / q.tickLength;
+        s_jobResults.push_back(std::move(result));
         if (s_results.is_open()) {
             s_results << fmt::format("{},{},{},{},{},{},{},{:.4f},{:.4f},{},{:.4f},{:.4f},{},{},{},{},{},{},{},{},{},{},{:.6f},{:.6f},{:.3f}\n",
                 job.name, job.group, job.profile, s_finishStatus, s_step, s_halfTicks,
@@ -11268,7 +11364,11 @@ class MicroCancelReplayHarness {
                 q.swallowedKeyUps, q.cancelled, q.lastPlanTicks,
                 decisionName(static_cast<Decision>(q.lastDecision)), q.pending ? 1 : 0,
                 q.released ? 1 : 0, q.physicalHeld ? 1 : 0, q.gameHeld ? 1 : 0,
-                q.expectedPressAt, q.actualPressAt, errTicks);
+                q.expectedPressAt, q.actualPressAt, errTicks,
+                job.maxSteps, static_cast<int>(job.inputs.size()),
+                s_inputPos >= job.inputs.size() && s_injected >= static_cast<int>(job.inputs.size()) ? 1 : 0,
+                q.awaitingManualPress ? 1 : 0,
+                followupState(q.awaitingManualPress, q.expectedPressAt, q.actualPressAt, true));
             s_results.flush();
         }
         if (s_trace.is_open()) {
@@ -11356,6 +11456,7 @@ public:
             s_levelName = level->m_levelName;
             s_songId = level->m_songID;
             s_audioTrack = level->m_audioTrack;
+            s_levelType = level->m_levelType;
             s_jobs = std::move(jobs);
             s_jobResults.clear();
             s_jobIndex = 0;
