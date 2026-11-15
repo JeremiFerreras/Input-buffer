@@ -911,6 +911,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <cctype>
 #include <cstdlib>
 #include <deque>
 #include <filesystem>
@@ -918,6 +919,7 @@
 #include <functional>
 #include <map>
 #include <set>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -2387,6 +2389,23 @@ struct LogConsole {
 //       cut by an orb /  pass the click through (we cannot see past it) -
 //       pad / portal?    the log says exactly which object did it
 // ----------------------------------------------------------------------------
+struct MicroCancelQaSnapshot {
+    int profile = 0;
+    bool pending = false;
+    bool released = false;
+    bool physicalHeld = false;
+    bool gameHeld = false;
+    bool awaitingManualPress = false;
+    long long arms = 0;
+    long long releases = 0;
+    long long swallowedKeyUps = 0;
+    long long cancelled = 0;
+    int lastPlanTicks = 0;
+    double expectedPressAt = -1.0;
+    double actualPressAt = -1.0;
+    double tickLength = 0.0;
+};
+
 class TrajectoryBufferSim {
     Ref<PlayerObject> m_simPlayer1;
     Ref<PlayerObject> m_simPlayer2;
@@ -2472,6 +2491,18 @@ class TrajectoryBufferSim {
     int m_microCancelRhythmWindow = -1;
     int m_microCancelReleaseTicks = 0;
     ibcore::MicroCancelLatch m_microCancelLatch;
+    // Locked only while the explicit file-driven QA replay is running.
+    bool m_microCancelQaLocked = false;
+    bool m_microCancelQaInjecting = false;
+    bool m_microCancelQaAwaitPress = false;
+    long long m_microCancelQaArms = 0;
+    long long m_microCancelQaReleases = 0;
+    long long m_microCancelQaSwallowedKeyUps = 0;
+    long long m_microCancelQaCancelled = 0;
+    int m_microCancelQaLastPlanTicks = 0;
+    double m_microCancelQaExpectedPressAt = -1.0;
+    double m_microCancelQaActualPressAt = -1.0;
+    double m_microCancelQaTickLength = 0.0;
 
     // ---- Game clock --------------------------------------------------------
     // Everything below is scheduled in GAME TIME (60fps-frame units, time warp
@@ -4644,11 +4675,7 @@ private:
     }
     void clearBuffer() {
         m_queue.clear();
-        if (m_microCancelLatch.cancelPending()) {
-            m_microCancelModeCode = -1;
-            m_microCancelRhythmWindow = -1;
-            m_microCancelReleaseTicks = 0;
-        }
+        if (m_microCancelLatch.pending()) cancelMicroCancelPending();
         m_live = false;
         m_planTrust = false;
         m_orbHelpHold = false;
@@ -6619,6 +6646,72 @@ public:
         setStage(next, true);
     }
 
+    // QA-only controls. The replay harness is inert unless the user creates
+    // save/micro-cancel-qa/jobs.txt. While locked, only its recorded inputs are
+    // allowed through; normal keyboard/mouse input cannot contaminate a run.
+    void qaBeginReplay(int profile) {
+        clearBuffer();
+        m_microCancelLatch.reset();
+        m_microCancelModeCode = -1;
+        m_microCancelRhythmWindow = -1;
+        m_microCancelReleaseTicks = 0;
+        m_physicalHolding = false;
+        m_gameHolding = false;
+        m_microCancelLevel = std::clamp(profile, 0, 3);
+        m_microCancelQaLocked = true;
+        m_microCancelQaInjecting = false;
+        m_microCancelQaAwaitPress = false;
+        m_microCancelQaArms = 0;
+        m_microCancelQaReleases = 0;
+        m_microCancelQaSwallowedKeyUps = 0;
+        m_microCancelQaCancelled = 0;
+        m_microCancelQaLastPlanTicks = 0;
+        m_microCancelQaExpectedPressAt = -1.0;
+        m_microCancelQaActualPressAt = -1.0;
+        m_microCancelQaTickLength = getValidDt();
+    }
+
+    void qaEndReplay() {
+        m_microCancelLatch.reset();
+        m_microCancelModeCode = -1;
+        m_microCancelRhythmWindow = -1;
+        m_microCancelReleaseTicks = 0;
+        m_microCancelLevel = static_cast<int>(ibcore::MicroCancelProfile::Off);
+        m_microCancelQaLocked = false;
+        m_microCancelQaInjecting = false;
+        m_microCancelQaAwaitPress = false;
+        m_physicalHolding = false;
+        m_gameHolding = false;
+    }
+
+    void qaSetInjecting(bool injecting) { m_microCancelQaInjecting = injecting; }
+
+    MicroCancelQaSnapshot qaSnapshot() const {
+        MicroCancelQaSnapshot out;
+        out.profile = m_microCancelLevel;
+        out.pending = m_microCancelLatch.pending();
+        out.released = m_microCancelLatch.released();
+        out.physicalHeld = m_physicalHolding;
+        out.gameHeld = m_gameHolding;
+        out.awaitingManualPress = m_microCancelQaAwaitPress;
+        out.arms = m_microCancelQaArms;
+        out.releases = m_microCancelQaReleases;
+        out.swallowedKeyUps = m_microCancelQaSwallowedKeyUps;
+        out.cancelled = m_microCancelQaCancelled;
+        out.lastPlanTicks = m_microCancelQaLastPlanTicks;
+        out.expectedPressAt = m_microCancelQaExpectedPressAt;
+        out.actualPressAt = m_microCancelQaActualPressAt;
+        out.tickLength = getValidDt();
+        return out;
+    }
+
+    void cancelMicroCancelPending() {
+        if (m_microCancelLatch.cancelPending()) ++m_microCancelQaCancelled;
+        m_microCancelModeCode = -1;
+        m_microCancelRhythmWindow = -1;
+        m_microCancelReleaseTicks = 0;
+    }
+
     void reportMicroCancelStatus() {
         pushLog(fmt::format("NOTE: EXPERIMENTAL MICRO-CANCEL {}. OFF at every launch; F9 cycles OFF / 1T / 2T / 3T. One verified release only; never auto-presses.",
                             ibcore::microCancelProfileName(m_microCancelLevel)), COL_YELLOW, false);
@@ -6626,13 +6719,10 @@ public:
     }
 
     void cycleMicroCancel() {
+        if (m_microCancelQaLocked) return;
         m_microCancelLevel = ibcore::nextMicroCancelProfile(m_microCancelLevel);
         if (m_microCancelLevel == static_cast<int>(ibcore::MicroCancelProfile::Off)) {
-            if (m_microCancelLatch.cancelPending()) {
-                m_microCancelModeCode = -1;
-                m_microCancelRhythmWindow = -1;
-                m_microCancelReleaseTicks = 0;
-            }
+            if (m_microCancelLatch.pending()) cancelMicroCancelPending();
         }
         reportMicroCancelStatus();
     }
@@ -7306,6 +7396,7 @@ public:
     //          false -> swallow it (it is buffered and will be re-fired)
     // ------------------------------------------------------------------------
     bool interceptInput(PlayLayer* pl, bool push, bool isPlayer1) {
+        if (m_microCancelQaLocked && !m_microCancelQaInjecting) return false;
         bool const isDual = pl->m_gameState.m_isDualMode && pl->m_player2 != nullptr;
         bool const isTwoPlayerControl = pl->m_level && pl->m_level->m_twoPlayerMode;
         // Which inputs are "yours"? GD (and keybind / remap mods) can deliver a
@@ -7323,12 +7414,11 @@ public:
         m_lastPrimaryTick = m_tick;
         m_lastPrimaryPush = push;
 
-        if (!push && m_microCancelLatch.cancelPending()) {
-            m_microCancelModeCode = -1;
-            m_microCancelRhythmWindow = -1;
-            m_microCancelReleaseTicks = 0;
-        }
+        if (!push && m_microCancelLatch.pending()) cancelMicroCancelPending();
         if (!push && m_microCancelLatch.consumePhysicalRelease()) {
+            ++m_microCancelQaSwallowedKeyUps;
+            m_microCancelQaAwaitPress = m_microCancelQaLocked;
+            m_microCancelQaActualPressAt = -1.0;
             // The automatic key-up happened before the player physically let
             // go. Preserve the player's real tap/gap calibration by recording
             // the physical key-up here, not at the synthetic release time.
@@ -7372,6 +7462,11 @@ public:
             return true;
         }
 
+        // Capture the first replay/user re-press after a synthetic key-up.
+        if (push && m_microCancelQaLocked && m_microCancelQaAwaitPress) {
+            m_microCancelQaActualPressAt = m_gameTime;
+            m_microCancelQaAwaitPress = false;
+        }
         // Always record the true physical state first.
         m_physicalHolding = push;
         m_inputsSeen++;
@@ -8084,6 +8179,11 @@ public:
             // planned boundary has passed, the prediction no longer authorizes it.
             if (plan && std::isfinite(releaseAt) && std::isfinite(m_gameTime) &&
                 releaseAt + TIME_EPS >= m_gameTime && m_microCancelLatch.arm(releaseAt)) {
+                ++m_microCancelQaArms;
+                m_microCancelQaLastPlanTicks = plan.releaseAfterTicks;
+                m_microCancelQaExpectedPressAt =
+                    m_gameTime + static_cast<double>(microNaturalCycleTicks) * dt;
+                m_microCancelQaActualPressAt = -1.0;
                 microCancelTicks = plan.releaseAfterTicks;
                 m_microCancelModeCode = modeCode(p1);
                 m_microCancelRhythmWindow = static_cast<int>(microRhythmWindow);
@@ -8559,13 +8659,10 @@ public:
             return;
         }
 
-        if (m_microCancelLatch.pending() && modeCode(player) != m_microCancelModeCode) {
-            m_microCancelLatch.cancelPending();
-            m_microCancelModeCode = -1;
-            m_microCancelRhythmWindow = -1;
-            m_microCancelReleaseTicks = 0;
-        }
+        if (m_microCancelLatch.pending() && modeCode(player) != m_microCancelModeCode)
+            cancelMicroCancelPending();
         if (m_microCancelLatch.process(m_gameTime, m_physicalHolding, m_gameHolding, TIME_EPS)) {
+            ++m_microCancelQaReleases;
             int const releasedAfter = m_microCancelReleaseTicks;
             // This is a synthetic release, not the user's physical key-up.
             // Keep the original press timestamp until the physical release is
