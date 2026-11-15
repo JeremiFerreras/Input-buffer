@@ -11136,7 +11136,7 @@ class MicroCancelReplayHarness {
         bool fresh = !std::filesystem::exists(path);
         s_results.open(path, std::ios::out | std::ios::app);
         if (fresh && s_results.is_open()) {
-            s_results << "job,group,profile,status,steps,half_ticks,injected,x,y,killer_id,killer_x,killer_y,mc_arms,mc_releases,mc_swallowed_keyups,mc_cancelled,mc_last_plan_ticks,mc_pending_at_end,mc_released_at_end,physical_held_at_end,game_held_at_end,expected_press_at,actual_press_at,press_error_ticks\n";
+            s_results << "job,group,profile,status,steps,half_ticks,injected,x,y,killer_id,killer_x,killer_y,mc_arms,mc_releases,mc_swallowed_keyups,mc_cancelled,mc_last_plan_ticks,last_decision,mc_pending_at_end,mc_released_at_end,physical_held_at_end,game_held_at_end,expected_press_at,actual_press_at,press_error_ticks\n";
         }
     }
 
@@ -11161,7 +11161,7 @@ class MicroCancelReplayHarness {
             finalizeCurrentJob(PlayLayer::get());
             return;
         }
-        s_trace << "job,group,profile,step,half,last,dt,x,y,y_vel,mode,upside,size,speed,on_ground,dead,physical_held,game_held,latch_pending,latch_released,mc_arms,mc_releases,mc_swallowed_keyups,mc_cancelled,mc_last_plan_ticks,mc_expected_press_at,mc_actual_press_at,mc_press_error_ticks\n";
+        s_trace << "job,group,profile,step,half,last,dt,x,y,y_vel,mode,decision,upside,size,speed,on_ground,dead,physical_held,game_held,latch_pending,latch_released,mc_arms,mc_releases,mc_swallowed_keyups,mc_cancelled,mc_last_plan_ticks,mc_expected_press_at,mc_actual_press_at,mc_press_error_ticks\n";
         log::info("[MicroCancelQA] job={} group={} profile={} inputs={} max_steps={}",
                   job.name, job.group, job.profile, job.inputs.size(), job.maxSteps);
         Notification::create(
@@ -11176,10 +11176,11 @@ class MicroCancelReplayHarness {
         double errTicks = -999.0;
         if (q.expectedPressAt >= 0.0 && q.actualPressAt >= 0.0 && q.tickLength > 0.0)
             errTicks = (q.actualPressAt - q.expectedPressAt) / q.tickLength;
-        s_trace << fmt::format("{},{},{},{},{},{},{:.6f},{:.4f},{:.4f},{:.6f},{},{},{:.3f},{:.3f},{},{},{},{},{},{},{},{},{},{},{},{:.6f},{:.6f},{:.3f}\n",
+        s_trace << fmt::format("{},{},{},{},{},{},{:.6f},{:.4f},{:.4f},{:.6f},{},{},{},{:.3f},{:.3f},{},{},{},{},{},{},{},{},{},{},{},{:.6f},{:.6f},{:.3f}\n",
             s_jobs[s_jobIndex].name, s_jobs[s_jobIndex].group, q.profile, step,
             half ? 1 : 0, last ? 1 : 0, dt, p->getPositionX(), p->getPositionY(),
-            p->m_yVelocity, modeName(p), p->m_isUpsideDown ? 1 : 0,
+            p->m_yVelocity, modeName(p), decisionName(static_cast<Decision>(q.lastDecision)),
+            p->m_isUpsideDown ? 1 : 0,
             p->m_vehicleSize, p->m_playerSpeed, p->m_isOnGround ? 1 : 0,
             p->m_isDead ? 1 : 0, q.physicalHeld ? 1 : 0, q.gameHeld ? 1 : 0,
             q.pending ? 1 : 0, q.released ? 1 : 0, q.arms, q.releases,
@@ -11261,10 +11262,11 @@ class MicroCancelReplayHarness {
             q.swallowedKeyUps, q.cancelled, q.pending, q.released
         });
         if (s_results.is_open()) {
-            s_results << fmt::format("{},{},{},{},{},{},{},{:.4f},{:.4f},{},{:.4f},{:.4f},{},{},{},{},{},{},{},{},{},{:.6f},{:.6f},{:.3f}\n",
+            s_results << fmt::format("{},{},{},{},{},{},{},{:.4f},{:.4f},{},{:.4f},{:.4f},{},{},{},{},{},{},{},{},{},{},{:.6f},{:.6f},{:.3f}\n",
                 job.name, job.group, job.profile, s_finishStatus, s_step, s_halfTicks,
                 s_injected, x, y, s_killerId, s_killerX, s_killerY, q.arms, q.releases,
-                q.swallowedKeyUps, q.cancelled, q.lastPlanTicks, q.pending ? 1 : 0,
+                q.swallowedKeyUps, q.cancelled, q.lastPlanTicks,
+                decisionName(static_cast<Decision>(q.lastDecision)), q.pending ? 1 : 0,
                 q.released ? 1 : 0, q.physicalHeld ? 1 : 0, q.gameHeld ? 1 : 0,
                 q.expectedPressAt, q.actualPressAt, errTicks);
             s_results.flush();
