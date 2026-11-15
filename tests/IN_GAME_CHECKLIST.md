@@ -19,3 +19,43 @@ Run these tests in Geometry Dash 2.2081 after the GitHub Actions package builds.
 ## Important
 
 Passing the standalone C++ unit tests is not proof of exact in-game prediction. Record any mismatch between console output and actual player behavior. A scan is advisory unless `Use Scanned Route (Experimental)` is enabled.
+
+
+## Micro-cancel — Phase 2 focused validation
+
+Run in Practice Mode with F9 OFF first, then compare the same section with F9 set to 1T, 2T and 3T. Keep the normal Input Buffer settings identical between runs.
+
+- [ ] Confirm micro-cancel starts OFF after every game launch.
+- [ ] Wave spam: test short and irregular taps, rising paths, descending paths, and both gravity directions.
+- [ ] Wave: test a press where the normal predictor reports no safe delayed press; confirm the synthetic release occurs only on its selected physics tick.
+- [ ] Confirm the player's next real press/release cadence is not replaced by an automatic input.
+- [ ] Confirm the real physical key-up after a synthetic release is consumed exactly once and the next physical press reaches GD.
+- [ ] Confirm the learned tap and gap timing is measured from the physical key-up, not the earlier synthetic release.
+- [ ] Ship: test a stable straight segment while rising, level, and falling; include several initial vertical velocities and both normal/mini Ship.
+- [ ] Confirm a mode-changing portal resets straight-flight evidence and cancels a still-pending incompatible release.
+- [ ] Confirm no intervention occurs when the next normal tap would end before the scheduled release, or when only one follow-up timing survives.
+- [ ] Confirm unknown geometry, moving hazards, orbs, dual/two-player control, queue activity, and budget exhaustion fail closed.
+- [ ] Confirm an overdue physics tick is not converted into an immediate release.
+- [ ] Confirm death, respawn, pause/resume, disabling F9, and changing gamemode do not leave a stale latch.
+- [ ] Compare with F9 OFF: ordinary Input Buffer decisions, queue order, and press/release timing must remain unchanged.
+- [ ] Repeat at 60, 120, 144, 170 and 240 FPS, with Click Between Frames both enabled and disabled, where supported.
+
+Record the level, x-position, mode, speed portal, gravity, player size, FPS/TPS, F9 profile, predicted release tick, actual release tick, physical follow-up timing, and outcome. A successful synthetic test is not a substitute for these in-game checks.
+
+
+## Phase 2 — real-engine replay gate (before adversarial stress)
+
+- [ ] Create a dedicated local test level with the target Wave spam or straight Ship section close to the spawn point.
+- [ ] Copy `tests/micro_cancel_qa.example.txt` to the mod save directory's `micro-cancel-qa/jobs.txt`.
+- [ ] Use one group per exact input tape. Include profile 0 (Micro-cancel OFF) and at least one active profile, with identical event step numbers for all jobs in the group.
+- [ ] Keep the normal Input Buffer F6 stage identical for the whole batch. Profile 0 turns OFF only Micro-cancel.
+- [ ] Run the batch in Geometry Dash 2.2081. The harness reloads the same level string in a fresh scene for every job and injects each press/release before the same `processCommands` step.
+- [ ] Inspect `out/results.csv`, every per-job trace, and `out/comparison.csv`.
+- [ ] Investigate every `REGRESSION`, `CHECK_LATCH`, `DIED_EARLIER`, or unexplained `NO_INTERVENTION` row before proceeding.
+- [ ] Confirm a `SAVED` row has at least one actual synthetic release, and that the player's next physical/replay press arrives within the recorded expected timing range.
+- [ ] Repeat for Wave and Ship in separate test-level batches, then repeat at normal/mini size, normal/inverted gravity, and the intended speed portals.
+- [ ] Do not treat a timeout as full level completion: set `max_steps` beyond the entire section under test.
+
+### Replay interpretation
+
+The OFF job is the baseline with the normal Input Buffer unchanged. `SAVED` means the baseline died and the tested profile survived through the configured test horizon. `REGRESSION` means the baseline survived but the tested profile died. `CHECK_LATCH` flags a latch that remained pending/released or inconsistent counters. `_NO_INTERVENTION` identifies a profile that did not send a synthetic release in that run. A result marked `DIED_LATER` is not a save; it only moved the death.

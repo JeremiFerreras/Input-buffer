@@ -911,6 +911,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <cctype>
 #include <cstdlib>
 #include <deque>
 #include <filesystem>
@@ -918,6 +919,7 @@
 #include <functional>
 #include <map>
 #include <set>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -1828,11 +1830,17 @@ struct SimResult {
     int       firstRingLast = -1;    // last step of that contact (in a row)
     int       nextRingTick = -1;     // first step you overlap ANOTHER orb after using one
     int       deathStep = -1;  // step (from the start, incl. the delay) it died on
+    // Minimum clearance across the entire simulated path, not just the first
+    // 100 ms decision-commit window. Used only by micro-cancel's recovery proof.
+    float     clearAll = 1e9f;
 };
 // Extra inputs injected into a test at fixed steps (-1 = none).
 struct FollowUp {
-    int  at[2]   = {-1, -1};
-    bool held[2] = {false, false};
+    // Two slots cover the existing buffer's press/release and release/press
+    // probes. The third slot lets micro-cancel model the player's complete
+    // next tap without generating any real input.
+    int  at[3]   = {-1, -1, -1};
+    bool held[3] = {false, false, false};
 };
 
 // Per sim player: where it started and how it moves, so objects can be judged
@@ -1855,6 +1863,7 @@ enum class Decision : uint8_t {
     PassNoWindow,   // window is shorter than one physics tick
     PassBudget,     // out of CPU budget, fell back to raw input
     PassNoFix,      // frame 0 predicted dead, no delay in the window clears it
+    MicroCanceled,  // experimental: one verified, one-shot automatic release
     PassEscapable, // frame 0 dies only if you never input again: you can still save it
     Buffered,       // input delayed
     Queued,         // opposite input queued behind a pending buffer
@@ -1872,6 +1881,7 @@ char const* decisionName(Decision d) {
         case Decision::PassNoWindow:  return "pass_nowindow";
         case Decision::PassBudget:    return "pass_budget";
         case Decision::PassNoFix:     return "pass_nofix";
+        case Decision::MicroCanceled: return "experimental_micro_cancel";
         case Decision::PassEscapable: return "pass_escape";
         case Decision::Buffered:      return "buffered";
         case Decision::Queued:        return "queued";
@@ -1890,6 +1900,7 @@ enum class DeathReason : uint8_t {
     OutOfBudget,      // CPU budget fallback
     BufferedStillDied,// delayed click still died
     EscapeNotTaken, // click was fine if followed up, the follow-up didn't happen in time
+    MicroCancelFailed, // experimental one-shot release did not prevent the death
     Other,
     Count
 };
@@ -1905,6 +1916,7 @@ char const* deathName(DeathReason r) {
         case DeathReason::OutOfBudget:       return "out_of_budget";
         case DeathReason::BufferedStillDied: return "buffered_still_died";
         case DeathReason::EscapeNotTaken:    return "escape_not_taken";
+        case DeathReason::MicroCancelFailed: return "micro_cancel_failed";
         case DeathReason::Other:             return "other";
         default:                             return "?";
     }
@@ -1922,6 +1934,7 @@ char const* deathText(DeathReason r) {
         case DeathReason::OutOfBudget:       return "CPU budget fallback";
         case DeathReason::BufferedStillDied: return "buffered click still died";
         case DeathReason::EscapeNotTaken:    return "needed a follow-up input";
+        case DeathReason::MicroCancelFailed: return "experimental micro-cancel still died";
         case DeathReason::Other:             return "other";
         default:                             return "?";
     }
@@ -2231,6 +2244,9 @@ struct LogConsole {
             SetConsoleCursorPosition(s_out, home);
         }
     }
+#else
+    // Non-Windows targets have no external console, but share the game-layer hook.
+    static void pump() {}
 #endif
 
     static bool available() {
@@ -2334,6 +2350,7 @@ struct LogConsole {
         int const wave = stage == 0 ? 0 : static_cast<int>(std::lround(STAGES[stage].w[W_WAVE] / BASE_DT));
         preset(0.f, stage, all, wave);
         event(0.f, "READY", "F6  CHANGE PRESET   |   F7  HIDE CONSOLE", COL_GREEN);
+        pump(); // flush the first two startup rows immediately
         return true;
 #else
         return false;
@@ -2372,6 +2389,24 @@ struct LogConsole {
 //       cut by an orb /  pass the click through (we cannot see past it) -
 //       pad / portal?    the log says exactly which object did it
 // ----------------------------------------------------------------------------
+struct MicroCancelQaSnapshot {
+    int profile = 0;
+    bool pending = false;
+    bool released = false;
+    bool physicalHeld = false;
+    bool gameHeld = false;
+    bool awaitingManualPress = false;
+    long long arms = 0;
+    long long releases = 0;
+    long long swallowedKeyUps = 0;
+    long long cancelled = 0;
+    int lastPlanTicks = 0;
+    int lastDecision = 0;
+    double expectedPressAt = -1.0;
+    double actualPressAt = -1.0;
+    double tickLength = 0.0;
+};
+
 class TrajectoryBufferSim {
     Ref<PlayerObject> m_simPlayer1;
     Ref<PlayerObject> m_simPlayer2;
@@ -2400,7 +2435,9 @@ class TrajectoryBufferSim {
     bool   m_outcomeAir    = false; // left the ground since the input
     double m_outcomeLandAt = -1.0;
     float  m_p1Speed = 0.f, m_p1Dir = 1.f; // real P1 horizontal speed (px / frame), direction
-    float  m_p1LastX = 0.f;
+    float  m_p1VerticalSpeed = 0.f; // vertical displacement per 60fps-frame
+    float  m_p1LastX = 0.f, m_p1LastY = 0.f;
+    int    m_p1StraightSamples = 0;
     double m_p1LastT = -1.0;
     long long m_spotFires = 0, m_spotBlocks = 0, m_spotSaves = 0;
     std::filesystem::path m_spotFile;  // <save dir>/spots/<level>.txt ("" = not saved)
@@ -2448,6 +2485,25 @@ class TrajectoryBufferSim {
     bool m_physicalHolding = false;
     bool m_gameHolding     = false;
     bool m_enabled         = true;
+
+    // Experimental micro-cancel is session-only and always starts OFF.
+    int m_microCancelLevel = static_cast<int>(ibcore::MicroCancelProfile::Off);
+    int m_microCancelModeCode = -1;
+    int m_microCancelRhythmWindow = -1;
+    int m_microCancelReleaseTicks = 0;
+    ibcore::MicroCancelLatch m_microCancelLatch;
+    // Locked only while the explicit file-driven QA replay is running.
+    bool m_microCancelQaLocked = false;
+    bool m_microCancelQaInjecting = false;
+    bool m_microCancelQaAwaitPress = false;
+    long long m_microCancelQaArms = 0;
+    long long m_microCancelQaReleases = 0;
+    long long m_microCancelQaSwallowedKeyUps = 0;
+    long long m_microCancelQaCancelled = 0;
+    int m_microCancelQaLastPlanTicks = 0;
+    double m_microCancelQaExpectedPressAt = -1.0;
+    double m_microCancelQaActualPressAt = -1.0;
+    double m_microCancelQaTickLength = 0.0;
 
     // ---- Game clock --------------------------------------------------------
     // Everything below is scheduled in GAME TIME (60fps-frame units, time warp
@@ -4620,6 +4676,7 @@ private:
     }
     void clearBuffer() {
         m_queue.clear();
+        if (m_microCancelLatch.pending()) cancelMicroCancelPending();
         m_live = false;
         m_planTrust = false;
         m_orbHelpHold = false;
@@ -4825,6 +4882,10 @@ public:
     void onPause(PlayLayer* pl) {
         if (m_queue.pending()) flushQueue(pl);
         clearBuffer();
+        m_microCancelLatch.reset();
+        m_microCancelModeCode = -1;
+        m_microCancelRhythmWindow = -1;
+        m_microCancelReleaseTicks = 0;
         m_physicalHolding = false;
         m_pendingSinceWall = Clock::time_point{};
     }
@@ -5138,9 +5199,12 @@ private:
                     setHeld(s1, s2, push);
                 }
             }
-            // Optional follow-up inputs (used to ask "could the player still save this?").
-            if (i == follow.at[0]) setHeld(s1, s2, follow.held[0]);
-            if (i == follow.at[1]) setHeld(s1, s2, follow.held[1]);
+            // Optional follow-up inputs (used only inside the hidden simulator).
+            // Unused slots remain -1, so existing input-buffer probes are unchanged.
+            for (int followIndex = 0; followIndex < 3; ++followIndex) {
+                if (i == follow.at[followIndex])
+                    setHeld(s1, s2, follow.held[followIndex]);
+            }
 
             s1->update(dt);
             s1->updateRotation(dt);
@@ -5233,6 +5297,7 @@ private:
         for (auto it = m_objRestore.rbegin(); it != m_objRestore.rend(); ++it) it->first->m_isActivated = it->second;
         m_objRestore.clear();
 
+        out.clearAll = m_scanClr;
         out.mover = m_simMover;
         out.killType = m_simKillType;
         out.killMover = m_simKillMover;
@@ -5305,6 +5370,11 @@ private:
             case Decision::PassTruncated:
                 tag = "RAW";
                 text = fmt::format("{}, {}", act, describeTrunc(n.r0.trunc));
+                return true;
+            case Decision::MicroCanceled:
+                tag = "NOTE";
+                color = COL_YELLOW;
+                text = fmt::format("EXPERIMENTAL micro-cancel: one release after +{} base tick(s), no re-press{}", n.delay, mode);
                 return true;
             case Decision::PassNoFix:
                 // Shown only with "Log: show safe clicks": the click went through
@@ -5497,6 +5567,7 @@ private:
             case Decision::PassNoFix:     return DeathReason::WindowTooSmall;
             case Decision::PassBudget:    return DeathReason::OutOfBudget;
             case Decision::Buffered:      return DeathReason::BufferedStillDied;
+            case Decision::MicroCanceled: return DeathReason::MicroCancelFailed;
             case Decision::PassEscapable: return DeathReason::EscapeNotTaken;
             default:                      return DeathReason::Other;
         }
@@ -5564,18 +5635,19 @@ private:
         auto w = [&](DeathReason x) { return st.byDeath[static_cast<int>(x)]; };
         long long avg = st.simClicks > 0 ? st.sumUs / st.simClicks : 0;
         return fmt::format(
-            "clicks={} buffered={} safe={} escape={} truncated={} spam={} nofix={} budget={} | sim avg={}us max={}us scale={:.2f} | "
+            "clicks={} buffered={} microCancel={} safe={} escape={} truncated={} spam={} nofix={} budget={} | sim avg={}us max={}us scale={:.2f} | "
             "accuracy={:.1f}% of {} (err {:.1f}px, died {}, dropped {}) | "
-            "deaths={} [mispredict={} later={} truncated={} spam={} window={} budget={} buffered={} escape={} none={}]",
-            st.clicks, d(Decision::Buffered), d(Decision::PassSafe), d(Decision::PassEscapable), d(Decision::PassTruncated),
-            d(Decision::PassSpam), d(Decision::PassNoFix), d(Decision::PassBudget),
+            "deaths={} [mispredict={} later={} truncated={} spam={} window={} budget={} buffered={} escape={} microCancel={} none={}]",
+            st.clicks, d(Decision::Buffered), d(Decision::MicroCanceled), d(Decision::PassSafe),
+            d(Decision::PassEscapable), d(Decision::PassTruncated), d(Decision::PassSpam),
+            d(Decision::PassNoFix), d(Decision::PassBudget),
             avg, st.maxUs, m_horizonScale,
             m_tracker.stats().percent(), m_tracker.stats().checks, m_tracker.stats().avgErr(),
             m_tracker.stats().deaths, m_tracker.stats().dropped,
             st.deaths, w(DeathReason::SimMispredict), w(DeathReason::LaterObstacle),
             w(DeathReason::Truncated), w(DeathReason::SpamBypass), w(DeathReason::WindowTooSmall),
             w(DeathReason::OutOfBudget), w(DeathReason::BufferedStillDied), w(DeathReason::EscapeNotTaken),
-            w(DeathReason::NoRecentClick));
+            w(DeathReason::MicroCancelFailed), w(DeathReason::NoRecentClick));
     }
 
     // ------------------------------------------------------------------------
@@ -5673,6 +5745,8 @@ public:
         m_outcome.clear();
         m_spotFires = m_spotBlocks = m_spotSaves = 0;
         m_p1LastT = -1.0;
+        m_p1VerticalSpeed = 0.f;
+        m_p1StraightSamples = 0;
         m_levelStart = Clock::now();
         m_frameDt = BASE_DT;
         m_dtIdx = 0;
@@ -6002,6 +6076,10 @@ public:
         m_trackPending = false;
         m_physicalHolding = false;
         m_gameHolding = false;
+        m_microCancelLatch.reset();
+        m_microCancelModeCode = -1;
+        m_microCancelRhythmWindow = -1;
+        m_microCancelReleaseTicks = 0;
         m_lastInputTime = -1e9;
         m_streamLast = -1e9;
         m_streamShift = 0.0;
@@ -6009,6 +6087,8 @@ public:
         m_movers.clear(); // positions from before a respawn mean nothing now
         m_outcome.clear(); // respawned: the last input is settled (death already counted)
         m_p1LastT = -1.0;
+        m_p1VerticalSpeed = 0.f;
+        m_p1StraightSamples = 0;
         m_liveWaited = false;
     }
 
@@ -6429,19 +6509,43 @@ public:
     // Every real P1 step: speed for the tolerances, and settle the pending input.
     void spotStep(PlayerObject* p) {
         float const x = p->getPositionX();
+        float const y = p->getPositionY();
         if (m_p1LastT >= 0.0) {
             double const gap = m_gameTime - m_p1LastT;
             if (gap > 0.05 && gap < 3.0) {
-                float const v = static_cast<float>((x - m_p1LastX) / gap);
-                if (std::fabs(v) < 200.f) {
-                    m_p1Speed = std::fabs(v);
-                    if (std::fabs(v) > 0.1f) m_p1Dir = v >= 0.f ? 1.f : -1.f;
+                float const vx = static_cast<float>((x - m_p1LastX) / gap);
+                float const vy = static_cast<float>((y - m_p1LastY) / gap);
+                bool const validMotion = std::fabs(vx) < 200.f && std::fabs(vy) < 200.f;
+                float const horizontalSpeed = std::fabs(vx);
+                float const stableSpeedDelta = std::max(0.08f, horizontalSpeed * 0.05f);
+                float const straightTolerance = std::max(0.04f, horizontalSpeed * 0.025f);
+                bool const horizontalStable = m_p1Speed <= 0.1f ||
+                    std::fabs(horizontalSpeed - m_p1Speed) <= stableSpeedDelta;
+                bool const nearHorizontal = std::fabs(vy) <= straightTolerance;
+                if (validMotion && horizontalSpeed > 0.5f && horizontalStable && nearHorizontal) {
+                    m_p1StraightSamples = std::min(m_p1StraightSamples + 1, 30);
+                } else {
+                    m_p1StraightSamples = 0;
+                }
+                if (validMotion) {
+                    m_p1Speed = horizontalSpeed;
+                    if (std::fabs(vx) > 0.1f) m_p1Dir = vx >= 0.f ? 1.f : -1.f;
+                    m_p1VerticalSpeed = vy;
                 }
                 m_p1LastX = x;
+                m_p1LastY = y;
+                m_p1LastT = m_gameTime;
+            } else if (gap >= 3.0) {
+                // A stale sample cannot be used to claim straight flight.
+                m_p1StraightSamples = 0;
+                m_p1LastX = x;
+                m_p1LastY = y;
                 m_p1LastT = m_gameTime;
             }
         } else {
+            m_p1StraightSamples = 0;
             m_p1LastX = x;
+            m_p1LastY = y;
             m_p1LastT = m_gameTime;
         }
         if (!m_outcome.pending()) return;
@@ -6519,6 +6623,7 @@ public:
     // notify: the "Input Buffer - Stage 3 ..." banner - only for the F6 key
     // (2.1); the window shows the stage itself.
     void setStage(int stage, bool notify = false) {
+        if (m_microCancelQaLocked) return;
         stage = std::clamp(stage, 0, STAGE_COUNT - 1);
         Mod::get()->setSettingValue<std::string>("stage", STAGES[stage].setting);
         invalidateCfg();
@@ -6538,9 +6643,92 @@ public:
     // Cycle key (F6): Stage 1 -> 2 -> 3 -> 4 -> Extreme -> Custom -> Off -> Stage 1.
     // Reads the stage directly, so it can never lose track of where it is.
     void cyclePreset() {
+        if (m_microCancelQaLocked) return;
         int const cur = Config::load().stage;
         int const next = (cur == STAGE_COUNT - 1) ? 0 : cur + 1;
         setStage(next, true);
+    }
+
+    // QA-only controls. The replay harness is inert unless the user creates
+    // save/micro-cancel-qa/jobs.txt. While locked, only its recorded inputs are
+    // allowed through; normal keyboard/mouse input cannot contaminate a run.
+    void qaBeginReplay(int profile) {
+        clearBuffer();
+        m_microCancelLatch.reset();
+        m_microCancelModeCode = -1;
+        m_microCancelRhythmWindow = -1;
+        m_microCancelReleaseTicks = 0;
+        m_physicalHolding = false;
+        m_gameHolding = false;
+        m_microCancelLevel = std::clamp(profile, 0, 3);
+        m_microCancelQaLocked = true;
+        m_microCancelQaInjecting = false;
+        m_microCancelQaAwaitPress = false;
+        m_microCancelQaArms = 0;
+        m_microCancelQaReleases = 0;
+        m_microCancelQaSwallowedKeyUps = 0;
+        m_microCancelQaCancelled = 0;
+        m_microCancelQaLastPlanTicks = 0;
+        m_microCancelQaExpectedPressAt = -1.0;
+        m_microCancelQaActualPressAt = -1.0;
+        m_microCancelQaTickLength = getValidDt();
+    }
+
+    void qaEndReplay() {
+        m_microCancelLatch.reset();
+        m_microCancelModeCode = -1;
+        m_microCancelRhythmWindow = -1;
+        m_microCancelReleaseTicks = 0;
+        m_microCancelLevel = static_cast<int>(ibcore::MicroCancelProfile::Off);
+        m_microCancelQaLocked = false;
+        m_microCancelQaInjecting = false;
+        m_microCancelQaAwaitPress = false;
+        m_physicalHolding = false;
+        m_gameHolding = false;
+    }
+
+    void qaSetInjecting(bool injecting) { m_microCancelQaInjecting = injecting; }
+
+    MicroCancelQaSnapshot qaSnapshot() const {
+        MicroCancelQaSnapshot out;
+        out.profile = m_microCancelLevel;
+        out.pending = m_microCancelLatch.pending();
+        out.released = m_microCancelLatch.released();
+        out.physicalHeld = m_physicalHolding;
+        out.gameHeld = m_gameHolding;
+        out.awaitingManualPress = m_microCancelQaAwaitPress;
+        out.arms = m_microCancelQaArms;
+        out.releases = m_microCancelQaReleases;
+        out.swallowedKeyUps = m_microCancelQaSwallowedKeyUps;
+        out.cancelled = m_microCancelQaCancelled;
+        out.lastPlanTicks = m_microCancelQaLastPlanTicks;
+        out.lastDecision = static_cast<int>(m_last.decision);
+        out.expectedPressAt = m_microCancelQaExpectedPressAt;
+        out.actualPressAt = m_microCancelQaActualPressAt;
+        out.tickLength = getValidDt();
+        return out;
+    }
+
+    void cancelMicroCancelPending() {
+        if (m_microCancelLatch.cancelPending()) ++m_microCancelQaCancelled;
+        m_microCancelModeCode = -1;
+        m_microCancelRhythmWindow = -1;
+        m_microCancelReleaseTicks = 0;
+    }
+
+    void reportMicroCancelStatus() {
+        pushLog(fmt::format("NOTE: EXPERIMENTAL MICRO-CANCEL {}. OFF at every launch; F9 cycles OFF / 1T / 2T / 3T. One verified release only; never auto-presses.",
+                            ibcore::microCancelProfileName(m_microCancelLevel)), COL_YELLOW, false);
+        LogConsole::pump(); // surface the startup/current mode notice immediately
+    }
+
+    void cycleMicroCancel() {
+        if (m_microCancelQaLocked) return;
+        m_microCancelLevel = ibcore::nextMicroCancelProfile(m_microCancelLevel);
+        if (m_microCancelLevel == static_cast<int>(ibcore::MicroCancelProfile::Off)) {
+            if (m_microCancelLatch.pending()) cancelMicroCancelPending();
+        }
+        reportMicroCancelStatus();
     }
 
     // ------------------------------------------------------------------------
@@ -7212,6 +7400,7 @@ public:
     //          false -> swallow it (it is buffered and will be re-fired)
     // ------------------------------------------------------------------------
     bool interceptInput(PlayLayer* pl, bool push, bool isPlayer1) {
+        if (m_microCancelQaLocked && !m_microCancelQaInjecting) return false;
         bool const isDual = pl->m_gameState.m_isDualMode && pl->m_player2 != nullptr;
         bool const isTwoPlayerControl = pl->m_level && pl->m_level->m_twoPlayerMode;
         // Which inputs are "yours"? GD (and keybind / remap mods) can deliver a
@@ -7229,10 +7418,45 @@ public:
         m_lastPrimaryTick = m_tick;
         m_lastPrimaryPush = push;
 
+        if (!push && m_microCancelLatch.pending()) cancelMicroCancelPending();
+        if (!push && m_microCancelLatch.consumePhysicalRelease()) {
+            ++m_microCancelQaSwallowedKeyUps;
+            m_microCancelQaAwaitPress = m_microCancelQaLocked;
+            m_microCancelQaActualPressAt = -1.0;
+            // The automatic key-up happened before the player physically let
+            // go. Preserve the player's real tap/gap calibration by recording
+            // the physical key-up here, not at the synthetic release time.
+            PlayerObject* releasePlayer = pl ? pl->m_player1 : nullptr;
+            if (releasePlayer) {
+                ModeInfo releaseMode;
+                releaseMode.add(releasePlayer);
+                int const savedWindow = m_microCancelRhythmWindow;
+                int const releaseWindow = (savedWindow >= 0 && savedWindow < W_COUNT)
+                    ? savedWindow : static_cast<int>(primaryWin(releaseMode, true));
+                if (m_lastPressAt >= 0.0) {
+                    double const hold = m_gameTime - m_lastPressAt;
+                    if (hold > 0.0 && hold < 60.0)
+                        m_holdLen[releaseWindow].add(static_cast<float>(hold));
+                }
+                if (releaseMode.wave) m_streamLast = m_gameTime;
+            }
+            m_lastPressAt = -1.0;
+            m_lastReleaseAt = m_gameTime;
+            m_lastInputTime = m_gameTime;
+            m_streak = 0;
+            m_physicalHolding = false;
+            m_inputsSeen++;
+            m_microCancelModeCode = -1;
+            m_microCancelRhythmWindow = -1;
+            m_microCancelReleaseTicks = 0;
+            return false;
+        }
+
         // Same state twice (key auto-repeat, or a second jump key while one is
         // held): GD sees it as it would without the mod, but it is never a new
         // click for the buffer, and never jumps ahead of a held input.
         if (push == m_physicalHolding) {
+            if (push && m_microCancelLatch.released()) return false; // never turn auto-repeat into a new press
             // Swallow only while an input is actually waiting to fire (so it
             // can't jump ahead of it). Otherwise let it through: the "held"
             // state may be stale (a release made in the pause menu never
@@ -7242,6 +7466,11 @@ public:
             return true;
         }
 
+        // Capture the first replay/user re-press after a synthetic key-up.
+        if (push && m_microCancelQaLocked && m_microCancelQaAwaitPress) {
+            m_microCancelQaActualPressAt = m_gameTime;
+            m_microCancelQaAwaitPress = false;
+        }
         // Always record the true physical state first.
         m_physicalHolding = push;
         m_inputsSeen++;
@@ -7580,13 +7809,29 @@ public:
             }
         }
 
+        // The original spam guard short-circuits before simulation. Only when
+        // the opt-in experiment is active and a measured target mode qualifies,
+        // let this press reach the normal predictor; otherwise preserve PassSpam.
+        bool const microWaveSpamCandidate = mode.wave && !mode.ship && inStream &&
+            m_lastReleaseAt >= 0.0 && m_gameTime >= m_lastReleaseAt &&
+            (m_gameTime - m_lastReleaseAt) <= STREAM_GAP_FRAMES;
+        float const microStraightTolerance = std::max(0.04f, m_p1Speed * 0.025f);
+        bool const microStraightShipCandidate = mode.ship && !mode.wave &&
+            m_p1StraightSamples >= 4 && m_p1Speed > 0.5f &&
+            std::fabs(m_p1VerticalSpeed) <= microStraightTolerance;
+        bool const microCancelSpamOverride = m_microCancelLevel > 0 && m_enabled && push &&
+            !isDual && !isTwoPlayerControl && p2 == nullptr &&
+            !m_queue.active() && !m_gameHolding &&
+            !m_microCancelLatch.pending() && !m_microCancelLatch.released() &&
+            (microWaveSpamCandidate || microStraightShipCandidate);
+
         // 3. Streak-based spam guard (real-time interval, off in Extreme).
         if (mode.spamGuarded() && !c.extreme) {
             double const interval = m_gameTime - m_lastInputTime;
             if (interval < static_cast<double>(c.spamFrames)) m_streak++;
             else m_streak = 0;
             m_lastInputTime = m_gameTime;
-            if (m_streak >= c.spamStreak) return pass(Decision::PassSpam);
+            if (m_streak >= c.spamStreak && !microCancelSpamOverride) return pass(Decision::PassSpam);
         } else {
             m_streak = 0;
             m_lastInputTime = m_gameTime;
@@ -7825,6 +8070,132 @@ public:
             rescue = true;
         }
 
+        // 8d. Experimental micro-cancel: only for a deadly no-fix press.
+        // The hidden GD player tests a single early release followed by the
+        // player's learned natural tap cycle. It never creates that real input.
+        // Unknown geometry, movers, orbs and budget exhaustion still fail closed.
+        int microCancelTicks = 0;
+        int microProbeUs = 0;
+        ibcore::MicroCancelGate microGate;
+        microGate.enabled = m_microCancelLevel > 0 && m_enabled;
+        microGate.press = push;
+        microGate.wave = mode.wave;
+        microGate.ship = mode.ship;
+        microGate.waveSpam = microWaveSpamCandidate;
+        microGate.straightFlight = microStraightShipCandidate;
+        microGate.dual = isDual || isTwoPlayerControl || p2 != nullptr;
+        microGate.queueActive = m_queue.active();
+        microGate.alreadyHolding = m_gameHolding;
+        microGate.baselineDied = (dec == Decision::PassNoFix && r0.end == SimEnd::Died && !escape0);
+        microGate.baselineTruncated = (r0.end == SimEnd::Truncated || r0.trunc.valid || r0.mover || r0.orbUsed);
+        microGate.baselineBudget = discard || r0.end == SimEnd::OutOfBudget || budgetHit;
+        microGate.maxTicks = m_microCancelLevel;
+
+        WinIdx const microRhythmWindow = primaryWin(mode, true);
+        float const microTapFrames = rhythm(m_holdLen[microRhythmWindow], DEFAULT_TAP_FRAMES);
+        float const microGapFrames = rhythm(m_gapLen[microRhythmWindow], DEFAULT_GAP_FRAMES);
+        int const microTapTicks = std::max(1, static_cast<int>(std::lround(microTapFrames / dt)));
+        int const microNaturalCycleTicks = std::max(1,
+            static_cast<int>(std::lround((microTapFrames + microGapFrames) / dt)));
+        int const microTimingJitter = std::max(1, scaleTicks(2, s));
+        int const microPostRecoveryTicks = scaleTicks(4, s);
+        int const microRecoveryHorizonMax =
+            microNaturalCycleTicks + microTimingJitter + microTapTicks + microPostRecoveryTicks;
+
+        long long const microElapsed = std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - t0).count();
+        int const clickBudgetRemaining = budgetUs > 0
+            ? std::max(0, budgetUs - static_cast<int>(std::min<long long>(microElapsed, 1000000)))
+            : 900;
+        int const microBudgetUs = std::min(900, clickBudgetRemaining);
+        if (ibcore::microCancelEligible(microGate) && microBudgetUs >= 200 &&
+            microRecoveryHorizonMax <= MAX_SIM_STEPS &&
+            !m_microCancelLatch.pending() && !m_microCancelLatch.released()) {
+            // Wave's ordinary lookahead is intentionally short for spam
+            // performance. Extend it only for this bounded micro-cancel probe,
+            // far enough to test the player's next natural tap, then restore it.
+            int const originalSimHorizon = x.horizon;
+            x.horizon = std::max(x.horizon, microRecoveryHorizonMax);
+            bool const oldRecordPath = m_recordPath;
+            bool const oldHasDeadline = m_hasDeadline;
+            auto const oldDeadline = m_deadline;
+            m_recordPath = false;
+            m_hasDeadline = true;
+            auto const microStart = Clock::now();
+            m_deadline = microStart + std::chrono::microseconds(microBudgetUs);
+            auto const plan = ibcore::planMicroCancelMinimal(microGate, [&](int baseTicks) {
+                int const releaseStep = scaleTicks(baseTicks, s);
+                // The player must still be physically holding the original tap
+                // when the synthetic release is due. If their normal key-up
+                // comes first, the latch cancels the intervention.
+                if (releaseStep >= microTapTicks) return ibcore::Verdict::Bad;
+
+                int const minRepress = releaseStep + scaleTicks(2, s);
+                if (microNaturalCycleTicks - microTimingJitter < minRepress)
+                    return ibcore::Verdict::Bad;
+                int const earlyRepress = microNaturalCycleTicks - microTimingJitter;
+                int const nominalRepress = microNaturalCycleTicks;
+                int const lateRepress = microNaturalCycleTicks + microTimingJitter;
+                int const recoveryHorizon = lateRepress + microTapTicks + microPostRecoveryTicks;
+                if (recoveryHorizon > x.horizon) return ibcore::Verdict::Bad;
+
+                ibcore::MicroCancelRecoveryWindow recovery;
+                auto checkManualTap = [&](int repressAt, bool& safe) -> ibcore::Verdict {
+                    FollowUp oneShot;
+                    oneShot.at[0] = releaseStep;
+                    oneShot.held[0] = false;                  // one automatic release
+                    oneShot.at[1] = repressAt;
+                    oneShot.held[1] = true;                   // predicted human re-press
+                    oneShot.at[2] = repressAt + microTapTicks;
+                    oneShot.held[2] = false;                  // predicted human key-up
+                    SimResult const candidate = sim(0, oneShot, recoveryHorizon);
+                    if (candidate.end == SimEnd::OutOfBudget) return ibcore::Verdict::Budget;
+                    if (candidate.end == SimEnd::Truncated || candidate.trunc.valid ||
+                        candidate.mover || candidate.orbUsed) return ibcore::Verdict::Partial;
+                    safe = candidate.end == SimEnd::Survived &&
+                           candidate.ticks >= recoveryHorizon &&
+                           candidate.clearAll >= clearTarget(mode.name()) + 0.75f;
+                    return safe ? ibcore::Verdict::Good : ibcore::Verdict::Bad;
+                };
+
+                ibcore::Verdict const earlyResult = checkManualTap(earlyRepress, recovery.earlySafe);
+                if (earlyResult == ibcore::Verdict::Partial || earlyResult == ibcore::Verdict::Budget)
+                    return earlyResult;
+                ibcore::Verdict const nominalResult = checkManualTap(nominalRepress, recovery.nominalSafe);
+                if (nominalResult == ibcore::Verdict::Partial || nominalResult == ibcore::Verdict::Budget)
+                    return nominalResult;
+                ibcore::Verdict const lateResult = checkManualTap(lateRepress, recovery.lateSafe);
+                if (lateResult == ibcore::Verdict::Partial || lateResult == ibcore::Verdict::Budget)
+                    return lateResult;
+
+                // Require the nominal rhythm and at least one neighbouring
+                // timing to work. A single frame-perfect recovery is rejected.
+                return recovery.robust() ? ibcore::Verdict::Good : ibcore::Verdict::Bad;
+            });
+            microProbeUs = static_cast<int>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - microStart).count());
+            x.horizon = originalSimHorizon;
+            m_recordPath = oldRecordPath;
+            m_hasDeadline = oldHasDeadline;
+            m_deadline = oldDeadline;
+            int const chosenReleaseStep = scaleTicks(plan.releaseAfterTicks, s);
+            double const gridStart = m_gameTime - static_cast<double>(tickPhase()) * dt;
+            double const releaseAt = gridStart + static_cast<double>(chosenReleaseStep) * dt;
+            // Do not fire late or snap a missed physics tick to "now": if the
+            // planned boundary has passed, the prediction no longer authorizes it.
+            if (plan && std::isfinite(releaseAt) && std::isfinite(m_gameTime) &&
+                releaseAt + TIME_EPS >= m_gameTime && m_microCancelLatch.arm(releaseAt)) {
+                ++m_microCancelQaArms;
+                m_microCancelQaLastPlanTicks = plan.releaseAfterTicks;
+                m_microCancelQaExpectedPressAt =
+                    m_gameTime + static_cast<double>(microNaturalCycleTicks) * dt;
+                m_microCancelQaActualPressAt = -1.0;
+                microCancelTicks = plan.releaseAfterTicks;
+                m_microCancelModeCode = modeCode(p1);
+                m_microCancelRhythmWindow = static_cast<int>(microRhythmWindow);
+                m_microCancelReleaseTicks = microCancelTicks;
+                dec = Decision::MicroCanceled;
+            }
+        }
+
         // Path of the chosen delay (orb note, accuracy check, overlay). One more
         // test, after the budget window: only when something will use it.
         std::vector<ibcore::Point2> pathB;
@@ -7839,9 +8210,9 @@ public:
 
         ClickNote n = base;
         n.d = dec;
-        n.us = usedUs;
+        n.us = usedUs + microProbeUs;
         n.r0 = r0;
-        n.delay = bestDelay;
+        n.delay = dec == Decision::MicroCanceled ? microCancelTicks : bestDelay;
         n.evals = evals;
         n.orb = viaOrb;
         n.needed = needed;
@@ -8242,6 +8613,9 @@ public:
         {
             int const mc = modeCode(player);
             if (mc != m_lastRealMode) {
+                // Straight-flight evidence must never carry across a portal.
+                m_p1StraightSamples = 0;
+                m_p1VerticalSpeed = 0.f;
                 if (m_lastRealMode >= 0) {
                     trace(fmt::format("real mode {} -> {} at ({:.1f},{:.1f}) lastPortalPos=({:.1f},{:.1f}) portalY={:.1f}",
                                       m_lastRealMode, mc, player->getPositionX(), player->getPositionY(),
@@ -8263,6 +8637,12 @@ public:
         // Dead (and not reported through the hook): report once. Alive again
         // after a death without a level reset (some respawn paths): re-arm.
         if (player->m_isDead) {
+            // A death resets the game's held-button state, so clear both the
+            // scheduled release and its pending physical-keyup swallow.
+            m_microCancelLatch.reset();
+            m_microCancelModeCode = -1;
+            m_microCancelRhythmWindow = -1;
+            m_microCancelReleaseTicks = 0;
             if (!m_deathReported) onRealDeath();
             return;
         }
@@ -8281,6 +8661,26 @@ public:
             clearBuffer();
             reconcile(pl);
             return;
+        }
+
+        if (m_microCancelLatch.pending() && modeCode(player) != m_microCancelModeCode)
+            cancelMicroCancelPending();
+        if (m_microCancelLatch.process(m_gameTime, m_physicalHolding, m_gameHolding, TIME_EPS)) {
+            ++m_microCancelQaReleases;
+            int const releasedAfter = m_microCancelReleaseTicks;
+            // This is a synthetic release, not the user's physical key-up.
+            // Keep the original press timestamp until the physical release is
+            // received and swallowed in interceptInput(), where real rhythm is
+            // recorded. The stream/streak state is still reset immediately.
+            m_lastInputTime = m_gameTime;
+            m_streak = 0;
+            m_streamShift = 0.0;
+            fireButton(pl, false);
+            // Keep the original mode/rhythm context until the physical key-up
+            // is consumed; a portal may have changed the live gamemode meanwhile.
+            m_microCancelReleaseTicks = 0;
+            pushLog(fmt::format("NOTE: EXPERIMENTAL MICRO-CANCEL sent one release after {} base tick(s); no re-press was generated.",
+                                releasedAfter), COL_YELLOW, false);
         }
 
         ensureSimPlayers(pl);
@@ -10299,10 +10699,6 @@ protected:
     }
 
     void update(float dt) override {
-        // Drain at most two queued terminal lines per frame. This keeps blocking
-        // console I/O out of the input hook and bounds the cost while playing.
-        LogConsole::pump();
-
         // background stars and the runners, only while the full window shows
         if (isVisible() && !m_compactNow) stepRunners(dt);
         if (m_stars && isVisible() && !m_compactNow) {
@@ -10520,17 +10916,22 @@ $on_mod(Loaded) {
         if (down && !repeat) s_sim.cyclePreset();
         return false; // don't swallow the key
     });
+    listenForKeybindSettingPresses("micro-cancel-cycle-key", [](Keybind const&, bool down, bool repeat, double) {
+        if (down && !repeat) s_sim.cycleMicroCancel();
+        return false; // experimental mode never consumes the key
+    });
     // This fork has no Input Buffer overlay. Open the external Windows console
     // automatically; F7 can close/reopen it without changing the game input.
 #ifdef GEODE_IS_WINDOWS
     queueInMainThread([] {
         if (!LogConsole::open()) log::warn("[InputBuffer] Could not allocate the live console");
+        else s_sim.reportMicroCancelStatus();
     });
 #endif
     listenForKeybindSettingPresses("console-key", [](Keybind const&, bool down, bool repeat, double) {
         if (down && !repeat && LogConsole::available()) {
             if (LogConsole::on()) LogConsole::close();
-            else LogConsole::open();
+            else if (LogConsole::open()) s_sim.reportMicroCancelStatus();
         }
         return false;
     });
@@ -10542,6 +10943,486 @@ $on_mod(Loaded) {
 
 
 // Show the window in the main menu too (if it's switched on).
+// ----------------------------------------------------------------------------
+//  Micro-cancel real-game replay QA
+//
+//  Opt-in only: create <Geode save dir>/micro-cancel-qa/jobs.txt while a level
+//  is open. Each job replays the same button tape in a fresh copy of that exact
+//  level, with profile 0 (OFF) or 1..3 (one-shot release profiles).
+//  Inputs are injected at the start of GJBaseGameLayer::processCommands; the
+//  player state is recorded after the game's own command/physics processing.
+//  This is a real-engine replay, not a reconstructed Wave/Ship kinematic model.
+// ----------------------------------------------------------------------------
+class MicroCancelReplayHarness {
+    struct InputEvent { int step = 0; bool down = false; };
+    struct Job {
+        std::string name;
+        std::string group;
+        int profile = 0;
+        int maxSteps = 12000;
+        std::vector<InputEvent> inputs;
+    };
+    struct JobResult {
+        std::string name, group, status;
+        int profile = 0;
+        int steps = 0, halfTicks = 0, injected = 0, lastPlanTicks = 0, lastDecision = 0;
+        long long arms = 0, releases = 0, swallowed = 0, cancelled = 0;
+        bool pending = false, released = false;
+    };
+
+    static inline std::vector<Job> s_jobs;
+    static inline std::vector<JobResult> s_jobResults;
+    static inline size_t s_jobIndex = 0;
+    static inline bool s_batchActive = false;
+    static inline bool s_jobRunning = false;
+    static inline bool s_finishPending = false;
+    static inline bool s_internalTransition = false;
+    static inline int s_step = 0;
+    static inline int s_halfTicks = 0;
+    static inline size_t s_inputPos = 0;
+    static inline int s_injected = 0;
+    static inline float s_lastDt = 0.f;
+    static inline std::string s_finishStatus;
+    static inline int s_killerId = -1;
+    static inline float s_killerX = 0.f, s_killerY = 0.f;
+    static inline std::string s_levelString;
+    static inline std::string s_levelName;
+    static inline int s_songId = 0, s_audioTrack = 0;
+    static inline std::filesystem::path s_dir, s_jobsRunningPath;
+    static inline std::ofstream s_trace;
+    static inline std::ofstream s_results;
+
+    static bool safeToken(std::string const& value) {
+        if (value.empty()) return false;
+        for (unsigned char ch : value) {
+            if (!(std::isalnum(ch) || ch == '_' || ch == '-')) return false;
+        }
+        return true;
+    }
+
+    static bool parseJobs(std::filesystem::path const& path, std::vector<Job>& out, std::string& error) {
+        std::ifstream in(path);
+        if (!in) { error = "could not open jobs.txt"; return false; }
+        Job* current = nullptr;
+        std::string line;
+        int lineNo = 0;
+        while (std::getline(in, line)) {
+            ++lineNo;
+            auto first = line.find_first_not_of(" \t\r");
+            if (first == std::string::npos || line[first] == '#') continue;
+            std::istringstream row(line.substr(first));
+            std::string key;
+            row >> key;
+            if (key == "job") {
+                Job job;
+                if (!(row >> job.name >> job.group >> job.profile >> job.maxSteps) ||
+                    !safeToken(job.name) || !safeToken(job.group) ||
+                    job.profile < 0 || job.profile > 3 ||
+                    job.maxSteps < 60 || job.maxSteps > 200000) {
+                    error = fmt::format("invalid job declaration on line {}", lineNo);
+                    return false;
+                }
+                std::string extra;
+                if (row >> extra) {
+                    error = fmt::format("unexpected text on job line {}", lineNo);
+                    return false;
+                }
+                if (std::any_of(out.begin(), out.end(), [&](Job const& j) { return j.name == job.name; })) {
+                    error = fmt::format("duplicate job name: {}", job.name);
+                    return false;
+                }
+                out.push_back(std::move(job));
+                current = &out.back();
+            } else if (key == "inputs") {
+                if (!current) { error = fmt::format("inputs before first job on line {}", lineNo); return false; }
+                std::string token;
+                while (row >> token) {
+                    auto colon = token.find(':');
+                    if (colon == std::string::npos) {
+                        error = fmt::format("invalid input token on line {}", lineNo);
+                        return false;
+                    }
+                    int step = -1;
+                    try { step = std::stoi(token.substr(0, colon)); }
+                    catch (...) { error = fmt::format("invalid input step on line {}", lineNo); return false; }
+                    std::string const state = token.substr(colon + 1);
+                    if (step < 0 || (state != "0" && state != "1")) {
+                        error = fmt::format("invalid input state on line {}", lineNo);
+                        return false;
+                    }
+                    current->inputs.push_back(InputEvent{step, state == "1"});
+                }
+            } else {
+                error = fmt::format("unknown directive '{}' on line {}", key, lineNo);
+                return false;
+            }
+        }
+        if (out.empty()) { error = "jobs.txt contains no jobs"; return false; }
+
+        std::map<std::string, std::vector<std::pair<int, bool>>> groupTape;
+        std::map<std::string, std::set<int>> groupProfiles;
+        for (auto const& job : out) {
+            if (job.inputs.size() < 2 || !job.inputs.front().down) {
+                error = fmt::format("{} must start with a press and contain press/release events", job.name);
+                return false;
+            }
+            bool wantDown = true;
+            int previousStep = -1;
+            std::vector<std::pair<int, bool>> signature;
+            for (auto const& event : job.inputs) {
+                if (event.step <= previousStep || event.down != wantDown) {
+                    error = fmt::format("{} has unordered or non-alternating inputs", job.name);
+                    return false;
+                }
+                if (event.step >= job.maxSteps) {
+                    error = fmt::format("{} has an input beyond max_steps", job.name);
+                    return false;
+                }
+                signature.emplace_back(event.step, event.down);
+                previousStep = event.step;
+                wantDown = !wantDown;
+            }
+            if (!wantDown) {
+                error = fmt::format("{} ends with a held button; add a final release event", job.name);
+                return false;
+            }
+            auto [it, inserted] = groupTape.emplace(job.group, signature);
+            if (!inserted && it->second != signature) {
+                error = fmt::format("jobs in group '{}' do not use identical input tapes", job.group);
+                return false;
+            }
+            if (!groupProfiles[job.group].insert(job.profile).second) {
+                error = fmt::format("group '{}' repeats profile {}", job.group, job.profile);
+                return false;
+            }
+        }
+        for (auto const& [group, profiles] : groupProfiles) {
+            if (!profiles.contains(0) || profiles.size() < 2) {
+                error = fmt::format("group '{}' needs an OFF baseline and at least one active profile", group);
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static std::string modeName(PlayerObject* p) {
+        if (!p) return "none";
+        if (p->m_isDart) return "wave";
+        if (p->m_isShip) return "ship";
+        if (p->m_isBird) return "ufo";
+        if (p->m_isSwing) return "swing";
+        if (p->m_isRobot) return "robot";
+        if (p->m_isSpider) return "spider";
+        if (p->m_isBall) return "ball";
+        return "cube";
+    }
+
+    static std::filesystem::path makeLevelPath() {
+        return s_dir / "out" / (s_jobs[s_jobIndex].name + ".csv");
+    }
+
+    static GJGameLevel* makeReplayLevel() {
+        auto level = GJGameLevel::create();
+        level->m_levelString = s_levelString;
+        level->m_levelName = s_levelName;
+        level->m_songID = s_songId;
+        level->m_audioTrack = s_audioTrack;
+        level->m_levelType = GJLevelType::Editor;
+        return level;
+    }
+
+    static void openResults() {
+        auto path = s_dir / "out" / "results.csv";
+        bool fresh = !std::filesystem::exists(path);
+        s_results.open(path, std::ios::out | std::ios::app);
+        if (fresh && s_results.is_open()) {
+            s_results << "job,group,profile,status,steps,half_ticks,injected,x,y,killer_id,killer_x,killer_y,mc_arms,mc_releases,mc_swallowed_keyups,mc_cancelled,mc_last_plan_ticks,last_decision,mc_pending_at_end,mc_released_at_end,physical_held_at_end,game_held_at_end,expected_press_at,actual_press_at,press_error_ticks\n";
+        }
+    }
+
+    static void beginCurrentJob() {
+        if (!s_batchActive || s_jobIndex >= s_jobs.size()) return;
+        Job const& job = s_jobs[s_jobIndex];
+        s_step = 0;
+        s_halfTicks = 0;
+        s_inputPos = 0;
+        s_injected = 0;
+        s_lastDt = 0.f;
+        s_finishPending = false;
+        s_finishStatus.clear();
+        s_killerId = -1;
+        s_killerX = s_killerY = 0.f;
+        s_sim.qaBeginReplay(job.profile);
+        s_jobRunning = true;
+        if (s_trace.is_open()) s_trace.close();
+        s_trace.open(makeLevelPath(), std::ios::out | std::ios::trunc);
+        if (!s_trace.is_open()) {
+            requestFinish("trace_open_failed", PlayLayer::get(), nullptr);
+            finalizeCurrentJob(PlayLayer::get());
+            return;
+        }
+        s_trace << "job,group,profile,step,half,last,dt,x,y,y_vel,mode,decision,upside,size,speed,on_ground,dead,physical_held,game_held,latch_pending,latch_released,mc_arms,mc_releases,mc_swallowed_keyups,mc_cancelled,mc_last_plan_ticks,mc_expected_press_at,mc_actual_press_at,mc_press_error_ticks\n";
+        log::info("[MicroCancelQA] job={} group={} profile={} inputs={} max_steps={}",
+                  job.name, job.group, job.profile, job.inputs.size(), job.maxSteps);
+        Notification::create(
+            fmt::format("Micro-cancel replay: {} / F9 {}T", job.name, job.profile),
+            NotificationIcon::Info, 2.f)->show();
+    }
+
+    static void writeTrace(PlayLayer* pl, float dt, bool half, bool last, int step) {
+        if (!s_trace.is_open() || !pl || !pl->m_player1) return;
+        PlayerObject* p = pl->m_player1;
+        auto q = s_sim.qaSnapshot();
+        double errTicks = -999.0;
+        if (q.expectedPressAt >= 0.0 && q.actualPressAt >= 0.0 && q.tickLength > 0.0)
+            errTicks = (q.actualPressAt - q.expectedPressAt) / q.tickLength;
+        s_trace << fmt::format("{},{},{},{},{},{},{:.6f},{:.4f},{:.4f},{:.6f},{},{},{},{:.3f},{:.3f},{},{},{},{},{},{},{},{},{},{},{},{:.6f},{:.6f},{:.3f}\n",
+            s_jobs[s_jobIndex].name, s_jobs[s_jobIndex].group, q.profile, step,
+            half ? 1 : 0, last ? 1 : 0, dt, p->getPositionX(), p->getPositionY(),
+            p->m_yVelocity, modeName(p), decisionName(static_cast<Decision>(q.lastDecision)),
+            p->m_isUpsideDown ? 1 : 0,
+            p->m_vehicleSize, p->m_playerSpeed, p->m_isOnGround ? 1 : 0,
+            p->m_isDead ? 1 : 0, q.physicalHeld ? 1 : 0, q.gameHeld ? 1 : 0,
+            q.pending ? 1 : 0, q.released ? 1 : 0, q.arms, q.releases,
+            q.swallowedKeyUps, q.cancelled, q.lastPlanTicks,
+            q.expectedPressAt, q.actualPressAt, errTicks);
+    }
+
+    static void requestFinish(std::string const& status, PlayLayer* pl, GameObject* killer) {
+        if (!s_jobRunning || s_finishPending) return;
+        s_finishPending = true;
+        s_finishStatus = status;
+        s_killerId = killer ? killer->m_objectID : -1;
+        s_killerX = killer ? killer->getPositionX() : 0.f;
+        s_killerY = killer ? killer->getPositionY() : 0.f;
+        geode::queueInMainThread([pl] {
+            if (s_jobRunning && s_finishPending && PlayLayer::get() == pl)
+                finalizeCurrentJob(pl);
+        });
+    }
+
+    static void writeComparison() {
+        auto path = s_dir / "out" / "comparison.csv";
+        std::ofstream out(path, std::ios::out | std::ios::trunc);
+        if (!out.is_open()) return;
+        out << "group,profile,baseline_job,test_job,baseline_status,test_status,baseline_steps,test_steps,mc_arms,mc_releases,mc_swallowed_keyups,mc_cancelled,last_decision,intervention,outcome,latch_state\n";
+        int saves = 0, regressions = 0, notIntervened = 0, latchFlags = 0;
+        for (auto const& test : s_jobResults) {
+            if (test.profile == 0) continue;
+            auto base = std::find_if(s_jobResults.begin(), s_jobResults.end(),
+                [&](JobResult const& r) { return r.group == test.group && r.profile == 0; });
+            if (base == s_jobResults.end()) continue;
+            bool const baseDied = base->status == "died";
+            bool const testDied = test.status == "died";
+            std::string outcome;
+            if (baseDied && !testDied) { outcome = "SAVED"; ++saves; }
+            else if (!baseDied && testDied) { outcome = "REGRESSION"; ++regressions; }
+            else if (baseDied && testDied) {
+                if (test.steps < base->steps) outcome = "DIED_EARLIER";
+                else if (test.steps > base->steps) outcome = "DIED_LATER";
+                else outcome = "DIED_BOTH";
+            } else outcome = "NO_DEATH_BOTH";
+
+            bool const latchLeak = test.pending || test.released ||
+                test.releases > test.arms || test.swallowed > test.releases;
+            std::string const latchState = latchLeak ? "CHECK_LATCH" : "CLEAN";
+            if (latchLeak) ++latchFlags;
+            bool const intervened = test.releases > 0;
+            if (!intervened) { outcome += "_NO_INTERVENTION"; ++notIntervened; }
+            out << fmt::format("{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+                test.group, test.profile, base->name, test.name, base->status,
+                test.status, base->steps, test.steps, test.arms, test.releases,
+                test.swallowed, test.cancelled,
+                decisionName(static_cast<Decision>(test.lastDecision)),
+                intervened ? "YES" : "NO", outcome, latchState);
+        }
+        out.flush();
+        log::info("[MicroCancelQA] comparison: saves={} regressions={} no_intervention={} latch_flags={}",
+                  saves, regressions, notIntervened, latchFlags);
+        Notification::create(
+            fmt::format("Replay comparison: {} saves / {} regressions / {} no-intervention",
+                        saves, regressions, notIntervened),
+            regressions > 0 || latchFlags > 0 ? NotificationIcon::Warning : NotificationIcon::Success,
+            7.f)->show();
+    }
+
+    static void finalizeCurrentJob(PlayLayer* pl = nullptr) {
+        if (!s_batchActive || !s_jobRunning) return;
+        auto q = s_sim.qaSnapshot();
+        PlayerObject* p = pl ? pl->m_player1 : nullptr;
+        float x = p ? p->getPositionX() : 0.f;
+        float y = p ? p->getPositionY() : 0.f;
+        double errTicks = -999.0;
+        if (q.expectedPressAt >= 0.0 && q.actualPressAt >= 0.0 && q.tickLength > 0.0)
+            errTicks = (q.actualPressAt - q.expectedPressAt) / q.tickLength;
+        Job const& job = s_jobs[s_jobIndex];
+        s_jobResults.push_back(JobResult{
+            job.name, job.group, s_finishStatus, job.profile, s_step, s_halfTicks,
+            s_injected, q.lastPlanTicks, q.lastDecision, q.arms, q.releases,
+            q.swallowedKeyUps, q.cancelled, q.pending, q.released
+        });
+        if (s_results.is_open()) {
+            s_results << fmt::format("{},{},{},{},{},{},{},{:.4f},{:.4f},{},{:.4f},{:.4f},{},{},{},{},{},{},{},{},{},{},{:.6f},{:.6f},{:.3f}\n",
+                job.name, job.group, job.profile, s_finishStatus, s_step, s_halfTicks,
+                s_injected, x, y, s_killerId, s_killerX, s_killerY, q.arms, q.releases,
+                q.swallowedKeyUps, q.cancelled, q.lastPlanTicks,
+                decisionName(static_cast<Decision>(q.lastDecision)), q.pending ? 1 : 0,
+                q.released ? 1 : 0, q.physicalHeld ? 1 : 0, q.gameHeld ? 1 : 0,
+                q.expectedPressAt, q.actualPressAt, errTicks);
+            s_results.flush();
+        }
+        if (s_trace.is_open()) {
+            s_trace.flush();
+            s_trace.close();
+        }
+        log::info("[MicroCancelQA] {} status={} steps={} mc_arms={} releases={} keyups={} cancelled={} latch={}/{}",
+                  job.name, s_finishStatus, s_step, q.arms, q.releases,
+                  q.swallowedKeyUps, q.cancelled, q.pending, q.released);
+        s_sim.qaEndReplay();
+        s_jobRunning = false;
+        s_finishPending = false;
+        ++s_jobIndex;
+        if (s_jobIndex < s_jobs.size()) {
+            s_internalTransition = true;
+            geode::queueInMainThread([] {
+                auto level = makeReplayLevel();
+                if (level) CCDirector::sharedDirector()->replaceScene(PlayLayer::scene(level, false, false));
+                else abortBatch("could_not_create_replay_level");
+            });
+        } else {
+            s_batchActive = false;
+            s_internalTransition = false;
+            std::error_code ec;
+            auto done = s_dir / "jobs.done.txt";
+            std::filesystem::remove(done, ec);
+            ec.clear();
+            std::filesystem::rename(s_jobsRunningPath, done, ec);
+            if (s_results.is_open()) { s_results.flush(); s_results.close(); }
+            writeComparison();
+            Notification::create("Micro-cancel real-game replay batch complete", NotificationIcon::Success, 5.f)->show();
+        }
+    }
+
+    static void abortBatch(std::string const& reason) {
+        if (!s_batchActive) return;
+        if (s_trace.is_open()) s_trace.close();
+        if (s_results.is_open()) { s_results.flush(); s_results.close(); }
+        s_sim.qaEndReplay();
+        s_jobRunning = false;
+        s_batchActive = false;
+        s_finishPending = false;
+        s_internalTransition = false;
+        std::error_code ec;
+        auto aborted = s_dir / "jobs.aborted.txt";
+        std::filesystem::remove(aborted, ec);
+        ec.clear();
+        if (!s_jobsRunningPath.empty() && std::filesystem::exists(s_jobsRunningPath, ec)) {
+            ec.clear();
+            std::filesystem::rename(s_jobsRunningPath, aborted, ec);
+        }
+        Notification::create(fmt::format("Micro-cancel QA stopped: {}", reason),
+                             NotificationIcon::Warning, 5.f)->show();
+    }
+
+public:
+    static void onPlayLayerInit(GJGameLevel* level) {
+        if (!level) return;
+        if (!s_batchActive) {
+            auto base = Mod::get()->getSaveDir() / "micro-cancel-qa";
+            auto jobsPath = base / "jobs.txt";
+            std::error_code ec;
+            if (!std::filesystem::exists(jobsPath, ec)) {
+                static bool pathLogged = false;
+                if (!pathLogged) {
+                    log::info("[MicroCancelQA] optional replay file path: {}", jobsPath.string());
+                    pathLogged = true;
+                }
+                return;
+            }
+            std::vector<Job> jobs;
+            std::string error;
+            if (!parseJobs(jobsPath, jobs, error)) {
+                Notification::create(fmt::format("Micro-cancel QA config invalid: {}", error),
+                                     NotificationIcon::Error, 7.f)->show();
+                auto invalid = base / "jobs.invalid.txt";
+                std::filesystem::remove(invalid, ec);
+                ec.clear();
+                std::filesystem::rename(jobsPath, invalid, ec);
+                return;
+            }
+            s_dir = base;
+            std::filesystem::create_directories(s_dir / "out", ec);
+            s_levelString = level->m_levelString;
+            s_levelName = level->m_levelName;
+            s_songId = level->m_songID;
+            s_audioTrack = level->m_audioTrack;
+            s_jobs = std::move(jobs);
+            s_jobResults.clear();
+            s_jobIndex = 0;
+            s_batchActive = true;
+            s_jobsRunningPath = s_dir / "jobs.running.txt";
+            std::filesystem::remove(s_jobsRunningPath, ec);
+            ec.clear();
+            std::filesystem::rename(jobsPath, s_jobsRunningPath, ec);
+            if (ec) {
+                abortBatch("could_not_claim_jobs_file");
+                return;
+            }
+            openResults();
+            if (!s_results.is_open()) {
+                abortBatch("could_not_open_results_csv");
+                return;
+            }
+        }
+        s_internalTransition = false;
+        if (!s_jobRunning) beginCurrentJob();
+    }
+
+    static void beforeStep(GJBaseGameLayer* layer) {
+        if (!s_jobRunning || s_finishPending || !layer) return;
+        PlayLayer* pl = PlayLayer::get();
+        if (!pl || static_cast<GJBaseGameLayer*>(pl) != layer) return;
+        auto const& inputs = s_jobs[s_jobIndex].inputs;
+        while (s_inputPos < inputs.size() && inputs[s_inputPos].step <= s_step) {
+            s_sim.qaSetInjecting(true);
+            layer->handleButton(inputs[s_inputPos].down, 1, true);
+            s_sim.qaSetInjecting(false);
+            ++s_inputPos;
+            ++s_injected;
+        }
+    }
+
+    static void afterStep(PlayLayer* pl, float dt, bool half, bool last) {
+        if (!s_jobRunning || !pl) return;
+        s_lastDt = dt;
+        if (half) ++s_halfTicks;
+        bool const finalStep = s_finishPending || (s_step + 1 >= s_jobs[s_jobIndex].maxSteps);
+        writeTrace(pl, dt, half, last || finalStep, s_step);
+        ++s_step;
+        if (s_finishPending) {
+            finalizeCurrentJob(pl);
+            return;
+        }
+        if (s_step >= s_jobs[s_jobIndex].maxSteps) {
+            s_finishStatus = "timeout";
+            s_finishPending = true;
+            finalizeCurrentJob(pl);
+        }
+    }
+
+    static void requestDeath(PlayLayer* pl, GameObject* killer) {
+        requestFinish("died", pl, killer);
+    }
+    static void requestComplete(PlayLayer* pl) {
+        requestFinish("complete", pl, nullptr);
+    }
+    static void onPause() {
+        if (s_batchActive && !s_internalTransition) abortBatch("paused");
+    }
+    static void onPlayLayerQuit() {
+        if (s_batchActive && !s_internalTransition) abortBatch("level_quit");
+    }
+};
 class $modify(BufMenuLayer, MenuLayer) {
     bool init() {
         // Deliberately do not create the Input Buffer window in any scene.
@@ -10558,6 +11439,7 @@ class $modify(BufPlayLayer, PlayLayer) {
     bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
         if (!PlayLayer::init(level, useReplay, dontCreateObjects)) return false;
         s_sim.init(this);
+        MicroCancelReplayHarness::onPlayLayerInit(level);
         return true;
     }
 
@@ -10567,6 +11449,7 @@ class $modify(BufPlayLayer, PlayLayer) {
     }
 
     void pauseGame(bool p0) {
+        if (p0) MicroCancelReplayHarness::onPause();
         if (!s_sim.realScanning()) s_sim.onPause(this);
         PlayLayer::pauseGame(p0);
         if (p0 && m_isPaused && !s_sim.realScanning()) s_sim.autoScanOnPause(this);
@@ -10582,6 +11465,7 @@ class $modify(BufPlayLayer, PlayLayer) {
         if (player && !wasDead && player->m_isDead &&
             (player == m_player1 || player == m_player2)) {
             s_sim.onRealDeath();
+            if (player == m_player1) MicroCancelReplayHarness::requestDeath(this, gameObject);
         }
     }
 
@@ -10589,10 +11473,12 @@ class $modify(BufPlayLayer, PlayLayer) {
         if (s_sim.isSimulating()) return;
         if (s_sim.realScanEnd()) return; // real-game scan reached the end: not a completion
         s_sim.onLevelEnd(this);
+        MicroCancelReplayHarness::requestComplete(this);
         PlayLayer::playEndAnimationToPos(p0);
     }
 
     void onQuit() {
+        MicroCancelReplayHarness::onPlayLayerQuit();
         PlayLayer::onQuit();
         s_sim.quit();
     }
@@ -10733,6 +11619,14 @@ class $modify(BufPlayerObject, PlayerObject) {
 };
 
 class $modify(BufBaseGameLayer, GJBaseGameLayer) {
+    void processCommands(float dt, bool isHalfTick, bool isLastTick) {
+        PlayLayer* pl = PlayLayer::get();
+        bool const mine = pl && static_cast<GJBaseGameLayer*>(pl) == this;
+        if (mine) MicroCancelReplayHarness::beforeStep(this);
+        GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
+        if (mine) MicroCancelReplayHarness::afterStep(pl, dt, isHalfTick, isLastTick);
+    }
+
     static void onModify(auto& self) {
         (void)self.setHookPriority("GJBaseGameLayer::canBeActivatedByPlayer", -1000000);
         (void)self.setHookPriority("GJBaseGameLayer::handleButton", -1000000);
@@ -10761,7 +11655,10 @@ class $modify(BufBaseGameLayer, GJBaseGameLayer) {
             s_sim.noteFrame(pl);
         }
         GJBaseGameLayer::update(dt);
-        if (mine) s_sim.watchdog(pl);
+        if (mine) {
+            LogConsole::pump(); // bounded terminal output, independent of the disabled window UI
+            s_sim.watchdog(pl);
+        }
     }
 
     bool canBeActivatedByPlayer(PlayerObject* p0, EffectGameObject* p1) {

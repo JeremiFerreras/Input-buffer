@@ -332,6 +332,184 @@ private:
 };
 
 // ----------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
+//  Experimental micro-cancel (one-shot release only; never creates a press)
+// ----------------------------------------------------------------------------
+enum class MicroCancelProfile : uint8_t {
+    Off = 0,
+    OneTick = 1,
+    TwoTicks = 2,
+    ThreeTicks = 3
+};
+
+inline int microCancelMaxTicks(int profile) {
+    return std::clamp(profile, 0, 3);
+}
+
+inline int nextMicroCancelProfile(int profile) {
+    return (microCancelMaxTicks(profile) + 1) % 4;
+}
+
+inline char const* microCancelProfileName(int profile) {
+    switch (microCancelMaxTicks(profile)) {
+        case 1: return "1 TICK";
+        case 2: return "2 TICKS";
+        case 3: return "3 TICKS";
+        default: return "OFF";
+    }
+}
+
+struct MicroCancelGate {
+    bool enabled = false;
+    bool press = false;
+    bool wave = false;
+    bool ship = false;
+    bool waveSpam = false;
+    bool straightFlight = false;
+    bool dual = false;
+    bool queueActive = false;
+    bool alreadyHolding = false;
+    bool baselineDied = false;
+    bool baselineTruncated = false;
+    bool baselineBudget = false;
+    int maxTicks = 0;
+};
+
+inline bool microCancelEligible(MicroCancelGate const& g) {
+    if (!g.enabled || !g.press || g.dual || g.queueActive || g.alreadyHolding ||
+        !g.baselineDied || g.baselineTruncated || g.baselineBudget || g.maxTicks <= 0) {
+        return false;
+    }
+    bool const waveSpam = g.wave && !g.ship && g.waveSpam;
+    bool const straightShip = g.ship && !g.wave && g.straightFlight;
+    return waveSpam || straightShip;
+}
+
+// A one-shot release is only useful when the player's normal next tap still
+// has a forgiving recovery window. The nominal rhythm must work, plus at
+// least one adjacent timing sample; a single frame-perfect follow-up is not
+// enough evidence to intervene.
+struct MicroCancelRecoveryWindow {
+    bool earlySafe = false;
+    bool nominalSafe = false;
+    bool lateSafe = false;
+
+    int safeCount() const {
+        return static_cast<int>(earlySafe) +
+               static_cast<int>(nominalSafe) +
+               static_cast<int>(lateSafe);
+    }
+    bool robust() const {
+        return nominalSafe && (earlySafe || lateSafe);
+    }
+};
+
+struct MicroCancelPlan {
+    int releaseAfterTicks = 0;
+    int evals = 0;
+    explicit operator bool() const { return releaseAfterTicks > 0; }
+};
+
+// Eval returns Verdict for a path with one release inserted at the requested tick.
+// Only Good can authorize an action. Partial (unknown geometry) and Budget
+// fail closed immediately instead of trying another guess.
+template <class Eval>
+MicroCancelPlan planMicroCancel(MicroCancelGate const& gate, Eval&& eval) {
+    MicroCancelPlan out;
+    if (!microCancelEligible(gate)) return out;
+    int const limit = std::clamp(gate.maxTicks, 1, 3);
+    for (int ticks = 1; ticks <= limit; ++ticks) {
+        Verdict const result = eval(ticks);
+        ++out.evals;
+        if (result == Verdict::Good) {
+            out.releaseAfterTicks = ticks;
+            return out;
+        }
+        if (result == Verdict::Partial || result == Verdict::Budget) return out;
+    }
+    return out;
+}
+
+// Prefer the latest proven release, because it changes the player's physical
+// hold for the shortest possible time. This is intentionally separate from
+// planMicroCancel(), whose earliest-first policy remains available unchanged.
+template <class Eval>
+MicroCancelPlan planMicroCancelMinimal(MicroCancelGate const& gate, Eval&& eval) {
+    MicroCancelPlan out;
+    if (!microCancelEligible(gate)) return out;
+    int const limit = std::clamp(gate.maxTicks, 1, 3);
+    for (int ticks = limit; ticks >= 1; --ticks) {
+        Verdict const result = eval(ticks);
+        ++out.evals;
+        if (result == Verdict::Good) {
+            out.releaseAfterTicks = ticks;
+            return out;
+        }
+        if (result == Verdict::Partial || result == Verdict::Budget) return out;
+    }
+    return out;
+}
+
+// Runtime latch: after one automatic release, swallow exactly one matching
+// physical key-up. If the user releases first, cancel the pending release and
+// let their real key-up pass through. No API here can synthesize a press.
+class MicroCancelLatch {
+public:
+    bool arm(double dueAt) {
+        if (m_pending || m_released || !std::isfinite(dueAt) || dueAt < 0.0) return false;
+        m_dueAt = dueAt;
+        m_pending = true;
+        return true;
+    }
+
+    bool process(double now, bool physicalHeld, bool gameHeld, double eps = 1e-6) {
+        if (!m_pending) return false;
+        // Invalid clocks must cancel the one-shot, never turn bad timing data
+        // into permission to release a button early.
+        if (!std::isfinite(now) || !std::isfinite(eps) || eps < 0.0) {
+            cancelPending();
+            return false;
+        }
+        if (!physicalHeld || !gameHeld) {
+            cancelPending();
+            return false;
+        }
+        if (now < m_dueAt - eps) return false;
+        m_pending = false;
+        m_dueAt = -1.0;
+        m_released = true;
+        return true;
+    }
+
+    bool cancelPending() {
+        if (!m_pending) return false;
+        m_pending = false;
+        m_dueAt = -1.0;
+        return true;
+    }
+
+    bool consumePhysicalRelease() {
+        if (!m_released) return false;
+        m_released = false;
+        return true;
+    }
+
+    bool pending() const { return m_pending; }
+    bool released() const { return m_released; }
+    double dueAt() const { return m_pending ? m_dueAt : -1.0; }
+
+    void reset() {
+        m_pending = false;
+        m_released = false;
+        m_dueAt = -1.0;
+    }
+
+private:
+    bool m_pending = false;
+    bool m_released = false;
+    double m_dueAt = -1.0;
+};
+
 //  Prediction tracker (live accuracy)
 //
 //  After a click is let through or buffered, the sim's predicted path for it
