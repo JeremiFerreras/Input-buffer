@@ -425,6 +425,12 @@ public:
 
     bool process(double now, bool physicalHeld, bool gameHeld, double eps = 1e-6) {
         if (!m_pending) return false;
+        // A corrupt/non-finite clock or tolerance must never be interpreted as
+        // "the release is due". Cancel the one-shot and preserve the real input.
+        if (!std::isfinite(now) || !std::isfinite(eps) || eps < 0.0) {
+            cancelPending();
+            return false;
+        }
         if (!physicalHeld || !gameHeld) {
             cancelPending();
             return false;
