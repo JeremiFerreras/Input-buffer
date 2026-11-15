@@ -245,7 +245,7 @@ class VideoProfileTests(unittest.TestCase):
         self.assertIn("LogConsole::pump(); // bounded terminal output", SOURCE)
         self.assertIn("class MicroCancelReplayHarness", SOURCE)
         self.assertIn("writeComparison()", SOURCE)
-        self.assertIn("m_jobResults.push_back", SOURCE)
+        self.assertIn("s_jobResults.push_back", SOURCE)
         self.assertIn("candidate.clearAll >= clearTarget(mode.name()) + 0.75f;", SOURCE)
         self.assertIn("save/micro-cancel-qa/jobs.txt", SOURCE)
         self.assertIn("s_sim.qaBeginReplay(job.profile)", SOURCE)
