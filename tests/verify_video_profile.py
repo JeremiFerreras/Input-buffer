@@ -99,6 +99,14 @@ class VideoProfileTests(unittest.TestCase):
         self.assertIn('static std::string consoleTag', SOURCE)
         self.assertIn('if (tag == "BUFFER") return "SAVE";', SOURCE)
         self.assertIn('LogConsole::event(t, consoleTag(tag), text, color);', SOURCE)
+        self.assertIn('MAX_PENDING_LINES = 96', console)
+        self.assertIn('MAX_LINES_PER_FRAME = 2', console)
+        self.assertIn('static void enqueue(PendingLine line)', console)
+        self.assertIn('static void pump()', console)
+        self.assertIn('std::find_if(s_pending.begin(), s_pending.end()', console)
+        self.assertIn('line.important = important;', console)
+        self.assertIn('LogConsole::pump();', SOURCE)
+        self.assertIn('s_pending.clear();', console)
 
     def test_no_input_buffer_visuals_enabled(self):
 

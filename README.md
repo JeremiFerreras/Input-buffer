@@ -13,7 +13,7 @@ A Geometry Dash 2.2081 / Geode mod fork that tests input timings against simulat
 - Re-checks delayed inputs against the live player state.
 - Offers five selectable profiles: Stage 1–4 and Off.
 - Can scan supported levels while paused and save an experimental route.
-- Uses a text-only Windows live console styled after `logo.png`: midnight-blue background, electric blue/cyan accents, violet section lines, timestamped colored events, and a compact scan progress bar. Saves and fired inputs appear alongside warnings and deaths; routine per-click debug traces stay in the in-game Log/Dev views and exported reports. The frame is drawn once when opened and the console only writes when an event occurs—there are no image assets, animation timers, polling loops, or per-frame console redraws.
+- Uses a text-only Windows live console styled after `logo.png`: midnight-blue background, electric blue/cyan accents, violet section lines, timestamped colored events, and a compact scan progress bar. Saves and fired inputs appear alongside warnings and deaths; routine per-click debug traces stay in the in-game Log/Dev views and exported reports. The frame is drawn once when opened. Events are queued in a 96-line bounded buffer and drained at no more than two terminal lines per UI frame; warning/death lines take priority over routine saves/fires if the terminal falls behind. This keeps blocking terminal I/O out of the input hook. There are no image assets, animation timers, threads, polling loops, or per-frame console redraws.
 
 ## Controls
 

@@ -2063,6 +2063,19 @@ struct LogConsole {
     static inline HANDLE s_out = nullptr;
     static inline WORD s_lastAttr = 0xffff;
 
+    struct PendingLine {
+        std::string prefix;
+        std::string label;
+        std::string body;
+        WORD labelAttr = 0;
+        WORD bodyAttr = 0;
+        bool important = false;
+    };
+    static inline std::deque<PendingLine> s_pending;
+    static inline size_t s_droppedPending = 0;
+    static constexpr size_t MAX_PENDING_LINES = 96;
+    static constexpr size_t MAX_LINES_PER_FRAME = 2;
+
     static constexpr WORD A_BLUE   = FOREGROUND_BLUE | FOREGROUND_INTENSITY;
     static constexpr WORD A_CYAN   = FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY;
     static constexpr WORD A_GREEN  = FOREGROUND_GREEN | FOREGROUND_INTENSITY;
@@ -2115,6 +2128,43 @@ struct LogConsole {
         DWORD written = 0;
         WriteConsoleA(s_out, text.data(), static_cast<DWORD>(text.size()), &written, nullptr);
     }
+
+    // Input hooks only enqueue. Terminal I/O is drained from the UI's normal
+    // update, two lines per frame at most, so a slow terminal cannot stall a click.
+    static void enqueue(PendingLine line) {
+        if (!s_on || !s_out) return;
+        if (s_pending.size() >= MAX_PENDING_LINES) {
+            auto const expendable = std::find_if(s_pending.begin(), s_pending.end(),
+                [](PendingLine const& pending) { return !pending.important; });
+            if (expendable != s_pending.end()) {
+                s_pending.erase(expendable);
+                ++s_droppedPending;
+            } else if (line.important) {
+                s_pending.pop_front();
+                ++s_droppedPending;
+            } else {
+                ++s_droppedPending;
+                return;
+            }
+        }
+        s_pending.push_back(std::move(line));
+    }
+
+    static void pump() {
+        if (!s_on || !s_out || s_pending.empty()) return;
+        size_t count = 0;
+        while (count++ < MAX_LINES_PER_FRAME && !s_pending.empty()) {
+            PendingLine line = std::move(s_pending.front());
+            s_pending.pop_front();
+            raw(line.prefix, A_MUTED);
+            raw(line.label, line.labelAttr);
+            raw(line.body, line.bodyAttr);
+            raw("\r\n", A_MUTED);
+        }
+    }
+
+    static size_t pendingCount() { return s_pending.size(); }
+    static size_t droppedPendingCount() { return s_droppedPending; }
 
     static void rule() {
         raw("+" + std::string(78, '-') + "+\r\n", A_BLUE);
@@ -2203,6 +2253,7 @@ struct LogConsole {
         std::string const label = fmt::format("[{:<6}] ", tag);
         WORD const bodyAttr = messageAttr(tag, color);
         constexpr size_t WIDTH = 78;
+        bool const important = tag == "WARN" || tag == "DEATH";
 
         std::string remaining = text;
         bool first = true;
@@ -2215,14 +2266,14 @@ struct LogConsole {
                 size_t const space = remaining.rfind(' ', count);
                 if (space != std::string::npos && space > 0) count = space;
             }
-            if (first) {
-                raw(prefix, A_MUTED);
-                raw(label, tagAttr(tag));
-            } else {
-                raw(continuationIndent, A_MUTED);
-            }
-            raw(remaining.substr(0, count), bodyAttr);
-            raw("\r\n", A_MUTED);
+            PendingLine line;
+            line.prefix = first ? prefix : continuationIndent;
+            line.label = first ? label : std::string();
+            line.body = remaining.substr(0, count);
+            line.labelAttr = first ? tagAttr(tag) : A_MUTED;
+            line.bodyAttr = bodyAttr;
+            line.important = important;
+            enqueue(std::move(line));
             if (count >= remaining.size()) break;
             size_t next = count;
             while (next < remaining.size() && remaining[next] == ' ') ++next;
@@ -2293,6 +2344,8 @@ struct LogConsole {
 #ifdef GEODE_IS_WINDOWS
         if (!s_on) return;
         s_on = false;
+        s_pending.clear();
+        s_droppedPending = 0;
         if (s_out) CloseHandle(s_out);
         s_out = nullptr;
         s_lastAttr = 0xffff;
@@ -10246,6 +10299,10 @@ protected:
     }
 
     void update(float dt) override {
+        // Drain at most two queued terminal lines per frame. This keeps blocking
+        // console I/O out of the input hook and bounds the cost while playing.
+        LogConsole::pump();
+
         // background stars and the runners, only while the full window shows
         if (isVisible() && !m_compactNow) stepRunners(dt);
         if (m_stars && isVisible() && !m_compactNow) {
