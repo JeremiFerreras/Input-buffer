@@ -8,6 +8,7 @@
 #include "BufferCore.hpp"
 
 #include <cstdio>
+#include <cstdint>
 #include <functional>
 #include <limits>
 #include <map>
@@ -1240,6 +1241,111 @@ static void testMicroCancelCore() {
     CHECK(!latch.pending() && !latch.released(), "reset must clear all latch state");
 }
 
+static void testMicroCancelLifecycleFuzz() {
+    std::printf("[micro-cancel lifecycle fuzz: 50,000 deterministic events]\\n");
+    MicroCancelLatch latch;
+    bool physicalHeld = false;
+    bool gameHeld = false;
+    double now = 0.0;
+    uint32_t rng = 0x6d696372u;
+    auto next = [&]() {
+        rng ^= rng << 13;
+        rng ^= rng >> 17;
+        rng ^= rng << 5;
+        return rng;
+    };
+    int arms = 0;
+    int autoReleases = 0;
+    int swallowedPhysicalUps = 0;
+    int manualPresses = 0;
+
+    for (int event = 0; event < 50000; ++event) {
+        switch (next() % 8) {
+            case 0:
+            case 1: // physical key-down; repeats do not create a new edge
+                if (!physicalHeld) {
+                    physicalHeld = true;
+                    if (!latch.released()) {
+                        gameHeld = true;
+                        ++manualPresses;
+                    }
+                }
+                break;
+            case 2: // physical key-up; swallow only after one synthetic release
+                if (physicalHeld) {
+                    physicalHeld = false;
+                    if (latch.consumePhysicalRelease()) {
+                        ++swallowedPhysicalUps;
+                    } else {
+                        latch.cancelPending();
+                        gameHeld = false;
+                    }
+                }
+                break;
+            case 3: // arm only for a currently-held physical/game button
+                if (physicalHeld && gameHeld && !latch.pending() && !latch.released()) {
+                    CHECK(latch.arm(now + 1.0 + static_cast<double>(next() % 3)),
+                          "fresh held press should arm once");
+                    ++arms;
+                } else {
+                    CHECK(!latch.arm(now + 1.0),
+                          "latch armed without an idle held press");
+                }
+                break;
+            case 4: // physics step
+                now += 0.25 + static_cast<double>(next() % 4) * 0.25;
+                if (latch.process(now, physicalHeld, gameHeld)) {
+                    ++autoReleases;
+                    gameHeld = false;
+                }
+                break;
+            case 5: // pause / focus loss / respawn
+                latch.reset();
+                physicalHeld = false;
+                gameHeld = false;
+                break;
+            case 6: // invalid clock must fail closed
+                if (latch.pending()) {
+                    CHECK(!latch.process(std::numeric_limits<double>::quiet_NaN(),
+                                         physicalHeld, gameHeld),
+                          "invalid clock must never emit a release");
+                    CHECK(!latch.pending(),
+                          "invalid clock must clear pending state");
+                }
+                break;
+            case 7: // death / mode transition
+                latch.reset();
+                physicalHeld = false;
+                gameHeld = false;
+                break;
+        }
+
+        CHECK(!(latch.pending() && latch.released()),
+              "pending and released states must be mutually exclusive");
+        if (latch.pending()) {
+            CHECK(physicalHeld && gameHeld,
+                  "pending release must still correspond to a held button");
+        }
+        if (latch.released()) {
+            CHECK(physicalHeld && !gameHeld,
+                  "after synthetic release physical must be held while game is up");
+        }
+        CHECK(autoReleases <= arms, "automatic releases exceeded arms");
+        CHECK(swallowedPhysicalUps <= autoReleases,
+              "swallowed physical key-ups exceeded synthetic releases");
+        if (!physicalHeld && !latch.released()) {
+            CHECK(!latch.pending(), "no physical hold may leave a pending release");
+        }
+    }
+
+    latch.reset();
+    CHECK(!latch.pending() && !latch.released(),
+          "final reset must clear all latch state");
+    CHECK(autoReleases <= arms, "release count cannot exceed arm count");
+    std::printf("  events=50000 arms=%d releases=%d swallowed_keyups=%d manual_presses=%d\\n",
+                arms, autoReleases, swallowedPhysicalUps, manualPresses);
+}
+
 static void testPushAt() {
     std::printf("[pushAt]\n");
     InputQueue q;
@@ -1266,6 +1372,7 @@ static void testPushAt() {
 
 int main() {
     testMicroCancelCore();
+    testMicroCancelLifecycleFuzz();
     testQueueCapacity();
     testQueueStress();
     testSearchStress();
