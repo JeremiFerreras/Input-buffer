@@ -45,6 +45,30 @@ When approved, the mod sends exactly one key-up. It never auto-presses or repeat
 
 The extra simulation budget remains capped at 900 microseconds per eligible attempt. Dual/two-player input and uncertain predictions remain excluded. Deterministic GD-inspired tests validate the scheduling policy, while runtime candidates are checked with the hidden in-game Geometry Dash player simulator. This remains experimental and must be tested in practice mode; passing CI is not proof of in-game reliability.
 
+## Real Geometry Dash replay QA (Phase 2 verification)
+
+The experimental branch now includes an opt-in replay harness that runs inside Geometry Dash 2.2081. It records the currently open level string, reloads a clean local copy for each job, injects the same button tape at the start of the real `GJBaseGameLayer::processCommands` call, and records player state after the game's own processing. It does not substitute a hand-written Wave/Ship motion model for the game engine.
+
+To use it:
+
+1. Open the dedicated local test level you want to evaluate. Put the target Wave or Ship section near the level spawn; each job restarts that same level string in a fresh scene.
+2. Find the mod's Geode save directory from the `[MicroCancelQA] optional replay file path` line in the Geode log. Create a `micro-cancel-qa` subfolder there if needed.
+3. Copy [micro_cancel_qa.example.txt](tests/micro_cancel_qa.example.txt) to `micro-cancel-qa/jobs.txt` and edit the input step numbers to your recorded test sequence.
+4. Use the same `group` name and identical `inputs` line for the OFF baseline and every active profile in that group. Profile `0` disables only Micro-cancel; the normal Input Buffer and its F6 stage remain active and unchanged. Profiles `1`, `2`, and `3` select the three Micro-cancel limits.
+5. Start/reopen the test level. The replay batch takes over jump input until all jobs finish. It blocks manual jump input and F6/F9 changes while the batch is active so the A/B comparison cannot be contaminated.
+
+The tape step is the zero-based invocation count of `processCommands`, not a wall-clock frame number. The trace also records the game's `isHalfTick` flag, so Click Between Frames sub-steps remain visible. Each event is `step:1` (press) or `step:0` (release); steps must be increasing, the tape must alternate press/release, and it must finish with a release. A group must contain an OFF job and at least one active profile, and all jobs in a group must use exactly the same tape.
+
+Outputs are written under `micro-cancel-qa/out/`:
+- `results.csv`: one final row per job, including the last buffer decision, Micro-cancel arms/releases/key-up consumption/cancellations, and latch state.
+- `<job-name>.csv`: per-`processCommands` player state (position, vertical velocity, mode, gravity, size, speed, held state, and latch/decision telemetry).
+- `comparison.csv`: automatic OFF-versus-profile classification: `SAVED`, `REGRESSION`, `DIED_EARLIER`, `DIED_LATER`, `DIED_BOTH`, or `NO_DEATH_BOTH`. `_NO_INTERVENTION` means that profile did not send a synthetic release. `CHECK_LATCH` means a pending/released latch or inconsistent event counters need inspection.
+- `jobs.done.txt` marks a completed batch. Pausing/quitting aborts the run and renames the input file to `jobs.aborted.txt`; invalid syntax is moved to `jobs.invalid.txt`.
+
+A `SAVED` result means the OFF baseline died while that profile survived to the job's configured end (level completion or `max_steps` timeout). A `REGRESSION` means OFF survived to that point but the profile died. A timeout is not proof that the whole level was completed; set `max_steps` beyond the entire hazard section being tested. Use separate test-level batches for different starting segments or different mechanics.
+
+This replay is deliberately deterministic at the game-input API boundary. It tests real 2.2081 player physics and collision processing, but not OS/device keyboard latency or human reaction time. Those belong in a later manual-input phase. Do not start the large randomized stress campaign until the replay comparisons show no unexplained `REGRESSION` or `CHECK_LATCH` rows.
+
 ## Scanning and safety
 
 Automatic scanning starts when a compatible level is paused and runs in short processing slices. The level must remain paused while the simulated scan runs.
