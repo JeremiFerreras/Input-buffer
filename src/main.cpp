@@ -10939,6 +10939,406 @@ $on_mod(Loaded) {
 
 
 // Show the window in the main menu too (if it's switched on).
+// ----------------------------------------------------------------------------
+//  Micro-cancel real-game replay QA
+//
+//  Opt-in only: create <Geode save dir>/micro-cancel-qa/jobs.txt while a level
+//  is open. Each job replays the same button tape in a fresh copy of that exact
+//  level, with profile 0 (OFF) or 1..3 (one-shot release profiles).
+//  Inputs are injected at the start of GJBaseGameLayer::processCommands; the
+//  player state is recorded after the game's own command/physics processing.
+//  This is a real-engine replay, not a reconstructed Wave/Ship kinematic model.
+// ----------------------------------------------------------------------------
+class MicroCancelReplayHarness {
+    struct InputEvent { int step = 0; bool down = false; };
+    struct Job {
+        std::string name;
+        std::string group;
+        int profile = 0;
+        int maxSteps = 12000;
+        std::vector<InputEvent> inputs;
+    };
+
+    static inline std::vector<Job> s_jobs;
+    static inline size_t s_jobIndex = 0;
+    static inline bool s_batchActive = false;
+    static inline bool s_jobRunning = false;
+    static inline bool s_finishPending = false;
+    static inline bool s_internalTransition = false;
+    static inline int s_step = 0;
+    static inline int s_halfTicks = 0;
+    static inline size_t s_inputPos = 0;
+    static inline int s_injected = 0;
+    static inline float s_lastDt = 0.f;
+    static inline std::string s_finishStatus;
+    static inline int s_killerId = -1;
+    static inline float s_killerX = 0.f, s_killerY = 0.f;
+    static inline std::string s_levelString;
+    static inline std::string s_levelName;
+    static inline int s_songId = 0, s_audioTrack = 0;
+    static inline std::filesystem::path s_dir, s_jobsRunningPath;
+    static inline std::ofstream s_trace;
+    static inline std::ofstream s_results;
+
+    static bool safeToken(std::string const& value) {
+        if (value.empty()) return false;
+        for (unsigned char ch : value) {
+            if (!(std::isalnum(ch) || ch == '_' || ch == '-')) return false;
+        }
+        return true;
+    }
+
+    static bool parseJobs(std::filesystem::path const& path, std::vector<Job>& out, std::string& error) {
+        std::ifstream in(path);
+        if (!in) { error = "could not open jobs.txt"; return false; }
+        Job* current = nullptr;
+        std::string line;
+        int lineNo = 0;
+        while (std::getline(in, line)) {
+            ++lineNo;
+            auto first = line.find_first_not_of(" \t\r");
+            if (first == std::string::npos || line[first] == '#') continue;
+            std::istringstream row(line.substr(first));
+            std::string key;
+            row >> key;
+            if (key == "job") {
+                Job job;
+                if (!(row >> job.name >> job.group >> job.profile >> job.maxSteps) ||
+                    !safeToken(job.name) || !safeToken(job.group) ||
+                    job.profile < 0 || job.profile > 3 ||
+                    job.maxSteps < 60 || job.maxSteps > 200000) {
+                    error = fmt::format("invalid job declaration on line {}", lineNo);
+                    return false;
+                }
+                std::string extra;
+                if (row >> extra) {
+                    error = fmt::format("unexpected text on job line {}", lineNo);
+                    return false;
+                }
+                if (std::any_of(out.begin(), out.end(), [&](Job const& j) { return j.name == job.name; })) {
+                    error = fmt::format("duplicate job name: {}", job.name);
+                    return false;
+                }
+                out.push_back(std::move(job));
+                current = &out.back();
+            } else if (key == "inputs") {
+                if (!current) { error = fmt::format("inputs before first job on line {}", lineNo); return false; }
+                std::string token;
+                while (row >> token) {
+                    auto colon = token.find(':');
+                    if (colon == std::string::npos) {
+                        error = fmt::format("invalid input token on line {}", lineNo);
+                        return false;
+                    }
+                    int step = -1;
+                    try { step = std::stoi(token.substr(0, colon)); }
+                    catch (...) { error = fmt::format("invalid input step on line {}", lineNo); return false; }
+                    std::string const state = token.substr(colon + 1);
+                    if (step < 0 || (state != "0" && state != "1")) {
+                        error = fmt::format("invalid input state on line {}", lineNo);
+                        return false;
+                    }
+                    current->inputs.push_back(InputEvent{step, state == "1"});
+                }
+            } else {
+                error = fmt::format("unknown directive '{}' on line {}", key, lineNo);
+                return false;
+            }
+        }
+        if (out.empty()) { error = "jobs.txt contains no jobs"; return false; }
+
+        std::map<std::string, std::vector<std::pair<int, bool>>> groupTape;
+        std::map<std::string, std::set<int>> groupProfiles;
+        for (auto const& job : out) {
+            if (job.inputs.size() < 2 || !job.inputs.front().down) {
+                error = fmt::format("{} must start with a press and contain press/release events", job.name);
+                return false;
+            }
+            bool wantDown = true;
+            int previousStep = -1;
+            std::vector<std::pair<int, bool>> signature;
+            for (auto const& event : job.inputs) {
+                if (event.step <= previousStep || event.down != wantDown) {
+                    error = fmt::format("{} has unordered or non-alternating inputs", job.name);
+                    return false;
+                }
+                if (event.step >= job.maxSteps) {
+                    error = fmt::format("{} has an input beyond max_steps", job.name);
+                    return false;
+                }
+                signature.emplace_back(event.step, event.down);
+                previousStep = event.step;
+                wantDown = !wantDown;
+            }
+            auto [it, inserted] = groupTape.emplace(job.group, signature);
+            if (!inserted && it->second != signature) {
+                error = fmt::format("jobs in group '{}' do not use identical input tapes", job.group);
+                return false;
+            }
+            if (!groupProfiles[job.group].insert(job.profile).second) {
+                error = fmt::format("group '{}' repeats profile {}", job.group, job.profile);
+                return false;
+            }
+        }
+        for (auto const& [group, profiles] : groupProfiles) {
+            if (!profiles.contains(0) || profiles.size() < 2) {
+                error = fmt::format("group '{}' needs an OFF baseline and at least one active profile", group);
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static std::string modeName(PlayerObject* p) {
+        if (!p) return "none";
+        if (p->m_isDart) return "wave";
+        if (p->m_isShip) return "ship";
+        if (p->m_isBird) return "ufo";
+        if (p->m_isSwing) return "swing";
+        if (p->m_isRobot) return "robot";
+        if (p->m_isSpider) return "spider";
+        if (p->m_isBall) return "ball";
+        return "cube";
+    }
+
+    static std::filesystem::path makeLevelPath() {
+        return s_dir / "out" / (s_jobs[s_jobIndex].name + ".csv");
+    }
+
+    static GJGameLevel* makeReplayLevel() {
+        auto level = GJGameLevel::create();
+        level->m_levelString = s_levelString;
+        level->m_levelName = s_levelName;
+        level->m_songID = s_songId;
+        level->m_audioTrack = s_audioTrack;
+        level->m_levelType = GJLevelType::Editor;
+        return level;
+    }
+
+    static void openResults() {
+        auto path = s_dir / "out" / "results.csv";
+        bool fresh = !std::filesystem::exists(path);
+        s_results.open(path, std::ios::out | std::ios::app);
+        if (fresh && s_results.is_open()) {
+            s_results << "job,group,profile,status,steps,half_ticks,injected,x,y,killer_id,killer_x,killer_y,mc_arms,mc_releases,mc_swallowed_keyups,mc_cancelled,mc_last_plan_ticks,mc_pending_at_end,mc_released_at_end,physical_held_at_end,game_held_at_end,expected_press_at,actual_press_at,press_error_ticks\n";
+        }
+    }
+
+    static void beginCurrentJob() {
+        if (!s_batchActive || s_jobIndex >= s_jobs.size()) return;
+        Job const& job = s_jobs[s_jobIndex];
+        s_step = 0;
+        s_halfTicks = 0;
+        s_inputPos = 0;
+        s_injected = 0;
+        s_lastDt = 0.f;
+        s_finishPending = false;
+        s_finishStatus.clear();
+        s_killerId = -1;
+        s_killerX = s_killerY = 0.f;
+        s_sim.qaBeginReplay(job.profile);
+        if (s_trace.is_open()) s_trace.close();
+        s_trace.open(makeLevelPath(), std::ios::out | std::ios::trunc);
+        if (!s_trace.is_open()) {
+            requestFinish("trace_open_failed", PlayLayer::get(), nullptr);
+            finalizeCurrentJob();
+            return;
+        }
+        s_trace << "job,group,profile,step,half,last,dt,x,y,y_vel,mode,upside,size,speed,on_ground,dead,physical_held,game_held,latch_pending,latch_released,mc_arms,mc_releases,mc_swallowed_keyups,mc_cancelled,mc_last_plan_ticks,mc_expected_press_at,mc_actual_press_at,mc_press_error_ticks\n";
+        s_jobRunning = true;
+        log::info("[MicroCancelQA] job={} group={} profile={} inputs={} max_steps={}",
+                  job.name, job.group, job.profile, job.inputs.size(), job.maxSteps);
+        Notification::create(
+            fmt::format("Micro-cancel replay: {} / F9 {}T", job.name, job.profile),
+            NotificationIcon::Info, 2.f)->show();
+    }
+
+    static void writeTrace(PlayLayer* pl, float dt, bool half, bool last, int step) {
+        if (!s_trace.is_open() || !pl || !pl->m_player1) return;
+        PlayerObject* p = pl->m_player1;
+        auto q = s_sim.qaSnapshot();
+        double errTicks = -999.0;
+        if (q.expectedPressAt >= 0.0 && q.actualPressAt >= 0.0 && q.tickLength > 0.0)
+            errTicks = (q.actualPressAt - q.expectedPressAt) / q.tickLength;
+        s_trace << fmt::format("{},{},{},{},{},{},{:.6f},{:.4f},{:.4f},{:.6f},{},{},{:.3f},{:.3f},{},{},{},{},{},{},{},{},{},{},{},{:.6f},{:.6f},{:.3f}\n",
+            s_jobs[s_jobIndex].name, s_jobs[s_jobIndex].group, q.profile, step,
+            half ? 1 : 0, last ? 1 : 0, dt, p->getPositionX(), p->getPositionY(),
+            p->m_yVelocity, modeName(p), p->m_isUpsideDown ? 1 : 0,
+            p->m_vehicleSize, p->m_playerSpeed, p->m_isOnGround ? 1 : 0,
+            p->m_isDead ? 1 : 0, q.physicalHeld ? 1 : 0, q.gameHeld ? 1 : 0,
+            q.pending ? 1 : 0, q.released ? 1 : 0, q.arms, q.releases,
+            q.swallowedKeyUps, q.cancelled, q.lastPlanTicks,
+            q.expectedPressAt, q.actualPressAt, errTicks);
+    }
+
+    static void requestFinish(std::string const& status, PlayLayer* pl, GameObject* killer) {
+        if (!s_jobRunning || s_finishPending) return;
+        s_finishPending = true;
+        s_finishStatus = status;
+        s_killerId = killer ? killer->m_objectID : -1;
+        s_killerX = killer ? killer->getPositionX() : 0.f;
+        s_killerY = killer ? killer->getPositionY() : 0.f;
+        (void)pl;
+    }
+
+    static void finalizeCurrentJob(PlayLayer* pl = nullptr) {
+        if (!s_batchActive || !s_jobRunning) return;
+        auto q = s_sim.qaSnapshot();
+        PlayerObject* p = pl ? pl->m_player1 : nullptr;
+        float x = p ? p->getPositionX() : 0.f;
+        float y = p ? p->getPositionY() : 0.f;
+        double errTicks = -999.0;
+        if (q.expectedPressAt >= 0.0 && q.actualPressAt >= 0.0 && q.tickLength > 0.0)
+            errTicks = (q.actualPressAt - q.expectedPressAt) / q.tickLength;
+        Job const& job = s_jobs[s_jobIndex];
+        if (s_results.is_open()) {
+            s_results << fmt::format("{},{},{},{},{},{},{},{:.4f},{:.4f},{},{:.4f},{:.4f},{},{},{},{},{},{},{},{},{},{:.6f},{:.6f},{:.3f}\n",
+                job.name, job.group, job.profile, s_finishStatus, s_step, s_halfTicks,
+                s_injected, x, y, s_killerId, s_killerX, s_killerY, q.arms, q.releases,
+                q.swallowedKeyUps, q.cancelled, q.lastPlanTicks, q.pending ? 1 : 0,
+                q.released ? 1 : 0, q.physicalHeld ? 1 : 0, q.gameHeld ? 1 : 0,
+                q.expectedPressAt, q.actualPressAt, errTicks);
+            s_results.flush();
+        }
+        if (s_trace.is_open()) {
+            writeTrace(pl, s_lastDt, false, true, s_step);
+            s_trace.flush();
+            s_trace.close();
+        }
+        log::info("[MicroCancelQA] {} status={} steps={} mc_arms={} releases={} keyups={} cancelled={} latch={}/{}",
+                  job.name, s_finishStatus, s_step, q.arms, q.releases,
+                  q.swallowedKeyUps, q.cancelled, q.pending, q.released);
+        s_sim.qaEndReplay();
+        s_jobRunning = false;
+        s_finishPending = false;
+        ++s_jobIndex;
+        if (s_jobIndex < s_jobs.size()) {
+            s_internalTransition = true;
+            geode::queueInMainThread([] {
+                auto level = makeReplayLevel();
+                if (level) CCDirector::sharedDirector()->replaceScene(PlayLayer::scene(level, false, false));
+                else abortBatch("could_not_create_replay_level");
+            });
+        } else {
+            s_batchActive = false;
+            s_internalTransition = false;
+            std::error_code ec;
+            auto done = s_dir / "jobs.done.txt";
+            std::filesystem::remove(done, ec);
+            ec.clear();
+            std::filesystem::rename(s_jobsRunningPath, done, ec);
+            if (s_results.is_open()) { s_results.flush(); s_results.close(); }
+            Notification::create("Micro-cancel real-game replay batch complete", NotificationIcon::Success, 5.f)->show();
+        }
+    }
+
+    static void abortBatch(std::string const& reason) {
+        if (!s_batchActive) return;
+        if (s_trace.is_open()) s_trace.close();
+        if (s_results.is_open()) { s_results.flush(); s_results.close(); }
+        s_sim.qaEndReplay();
+        s_jobRunning = false;
+        s_batchActive = false;
+        s_finishPending = false;
+        s_internalTransition = false;
+        std::error_code ec;
+        auto aborted = s_dir / "jobs.aborted.txt";
+        std::filesystem::remove(aborted, ec);
+        ec.clear();
+        if (!s_jobsRunningPath.empty() && std::filesystem::exists(s_jobsRunningPath, ec)) {
+            ec.clear();
+            std::filesystem::rename(s_jobsRunningPath, aborted, ec);
+        }
+        Notification::create(fmt::format("Micro-cancel QA stopped: {}", reason),
+                             NotificationIcon::Warning, 5.f)->show();
+    }
+
+public:
+    static void onPlayLayerInit(GJGameLevel* level) {
+        if (!level) return;
+        if (!s_batchActive) {
+            auto base = Mod::get()->getSaveDir() / "micro-cancel-qa";
+            auto jobsPath = base / "jobs.txt";
+            std::error_code ec;
+            if (!std::filesystem::exists(jobsPath, ec)) return;
+            std::vector<Job> jobs;
+            std::string error;
+            if (!parseJobs(jobsPath, jobs, error)) {
+                Notification::create(fmt::format("Micro-cancel QA config invalid: {}", error),
+                                     NotificationIcon::Error, 7.f)->show();
+                auto invalid = base / "jobs.invalid.txt";
+                std::filesystem::remove(invalid, ec);
+                ec.clear();
+                std::filesystem::rename(jobsPath, invalid, ec);
+                return;
+            }
+            s_dir = base;
+            std::filesystem::create_directories(s_dir / "out", ec);
+            s_levelString = level->m_levelString;
+            s_levelName = level->m_levelName;
+            s_songId = level->m_songID;
+            s_audioTrack = level->m_audioTrack;
+            s_jobs = std::move(jobs);
+            s_jobIndex = 0;
+            s_batchActive = true;
+            s_jobsRunningPath = s_dir / "jobs.running.txt";
+            std::filesystem::remove(s_jobsRunningPath, ec);
+            ec.clear();
+            std::filesystem::rename(jobsPath, s_jobsRunningPath, ec);
+            if (ec) {
+                abortBatch("could_not_claim_jobs_file");
+                return;
+            }
+            openResults();
+        }
+        s_internalTransition = false;
+        if (!s_jobRunning) beginCurrentJob();
+    }
+
+    static void beforeStep(GJBaseGameLayer* layer) {
+        if (!s_jobRunning || s_finishPending || !layer) return;
+        PlayLayer* pl = PlayLayer::get();
+        if (!pl || static_cast<GJBaseGameLayer*>(pl) != layer) return;
+        auto const& inputs = s_jobs[s_jobIndex].inputs;
+        while (s_inputPos < inputs.size() && inputs[s_inputPos].step <= s_step) {
+            s_sim.qaSetInjecting(true);
+            layer->handleButton(inputs[s_inputPos].down, 1, true);
+            s_sim.qaSetInjecting(false);
+            ++s_inputPos;
+            ++s_injected;
+        }
+    }
+
+    static void afterStep(PlayLayer* pl, float dt, bool half, bool last) {
+        if (!s_jobRunning || !pl) return;
+        s_lastDt = dt;
+        if (half) ++s_halfTicks;
+        writeTrace(pl, dt, half, last, s_step);
+        ++s_step;
+        if (s_finishPending) {
+            finalizeCurrentJob(pl);
+            return;
+        }
+        if (s_step >= s_jobs[s_jobIndex].maxSteps) {
+            s_finishStatus = "timeout";
+            s_finishPending = true;
+            finalizeCurrentJob(pl);
+        }
+    }
+
+    static void requestDeath(PlayLayer* pl, GameObject* killer) {
+        requestFinish("died", pl, killer);
+    }
+    static void requestComplete(PlayLayer* pl) {
+        requestFinish("complete", pl, nullptr);
+    }
+    static void onPause() {
+        if (s_batchActive && !s_internalTransition) abortBatch("paused");
+    }
+    static void onPlayLayerQuit() {
+        if (s_batchActive && !s_internalTransition) abortBatch("level_quit");
+    }
+};
 class $modify(BufMenuLayer, MenuLayer) {
     bool init() {
         // Deliberately do not create the Input Buffer window in any scene.
@@ -10955,6 +11355,7 @@ class $modify(BufPlayLayer, PlayLayer) {
     bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
         if (!PlayLayer::init(level, useReplay, dontCreateObjects)) return false;
         s_sim.init(this);
+        MicroCancelReplayHarness::onPlayLayerInit(level);
         return true;
     }
 
@@ -10964,6 +11365,7 @@ class $modify(BufPlayLayer, PlayLayer) {
     }
 
     void pauseGame(bool p0) {
+        if (p0) MicroCancelReplayHarness::onPause();
         if (!s_sim.realScanning()) s_sim.onPause(this);
         PlayLayer::pauseGame(p0);
         if (p0 && m_isPaused && !s_sim.realScanning()) s_sim.autoScanOnPause(this);
@@ -10979,6 +11381,7 @@ class $modify(BufPlayLayer, PlayLayer) {
         if (player && !wasDead && player->m_isDead &&
             (player == m_player1 || player == m_player2)) {
             s_sim.onRealDeath();
+            if (player == m_player1) MicroCancelReplayHarness::requestDeath(this, gameObject);
         }
     }
 
@@ -10986,10 +11389,12 @@ class $modify(BufPlayLayer, PlayLayer) {
         if (s_sim.isSimulating()) return;
         if (s_sim.realScanEnd()) return; // real-game scan reached the end: not a completion
         s_sim.onLevelEnd(this);
+        MicroCancelReplayHarness::requestComplete(this);
         PlayLayer::playEndAnimationToPos(p0);
     }
 
     void onQuit() {
+        MicroCancelReplayHarness::onPlayLayerQuit();
         PlayLayer::onQuit();
         s_sim.quit();
     }
@@ -11130,6 +11535,14 @@ class $modify(BufPlayerObject, PlayerObject) {
 };
 
 class $modify(BufBaseGameLayer, GJBaseGameLayer) {
+    void processCommands(float dt, bool isHalfTick, bool isLastTick) {
+        PlayLayer* pl = PlayLayer::get();
+        bool const mine = pl && static_cast<GJBaseGameLayer*>(pl) == this;
+        if (mine) MicroCancelReplayHarness::beforeStep(this);
+        GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
+        if (mine) MicroCancelReplayHarness::afterStep(pl, dt, isHalfTick, isLastTick);
+    }
+
     static void onModify(auto& self) {
         (void)self.setHookPriority("GJBaseGameLayer::canBeActivatedByPlayer", -1000000);
         (void)self.setHookPriority("GJBaseGameLayer::handleButton", -1000000);
