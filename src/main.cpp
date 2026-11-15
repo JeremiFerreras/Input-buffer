@@ -2401,6 +2401,7 @@ struct MicroCancelQaSnapshot {
     long long swallowedKeyUps = 0;
     long long cancelled = 0;
     int lastPlanTicks = 0;
+    int lastDecision = 0;
     double expectedPressAt = -1.0;
     double actualPressAt = -1.0;
     double tickLength = 0.0;
@@ -6701,6 +6702,7 @@ public:
         out.swallowedKeyUps = m_microCancelQaSwallowedKeyUps;
         out.cancelled = m_microCancelQaCancelled;
         out.lastPlanTicks = m_microCancelQaLastPlanTicks;
+        out.lastDecision = static_cast<int>(m_last.decision);
         out.expectedPressAt = m_microCancelQaExpectedPressAt;
         out.actualPressAt = m_microCancelQaActualPressAt;
         out.tickLength = getValidDt();
@@ -10960,8 +10962,16 @@ class MicroCancelReplayHarness {
         int maxSteps = 12000;
         std::vector<InputEvent> inputs;
     };
+    struct JobResult {
+        std::string name, group, status;
+        int profile = 0;
+        int steps = 0, halfTicks = 0, injected = 0, lastPlanTicks = 0, lastDecision = 0;
+        long long arms = 0, releases = 0, swallowed = 0, cancelled = 0;
+        bool pending = false, released = false;
+    };
 
     static inline std::vector<Job> s_jobs;
+    static inline std::vector<JobResult> s_jobResults;
     static inline size_t s_jobIndex = 0;
     static inline bool s_batchActive = false;
     static inline bool s_jobRunning = false;
@@ -11071,6 +11081,10 @@ class MicroCancelReplayHarness {
                 signature.emplace_back(event.step, event.down);
                 previousStep = event.step;
                 wantDown = !wantDown;
+            }
+            if (!wantDown) {
+                error = fmt::format("{} ends with a held button; add a final release event", job.name);
+                return false;
             }
             auto [it, inserted] = groupTape.emplace(job.group, signature);
             if (!inserted && it->second != signature) {
@@ -11186,6 +11200,51 @@ class MicroCancelReplayHarness {
         });
     }
 
+    static void writeComparison() {
+        auto path = s_dir / "out" / "comparison.csv";
+        std::ofstream out(path, std::ios::out | std::ios::trunc);
+        if (!out.is_open()) return;
+        out << "group,profile,baseline_job,test_job,baseline_status,test_status,baseline_steps,test_steps,mc_arms,mc_releases,mc_swallowed_keyups,mc_cancelled,last_decision,intervention,outcome,latch_state\n";
+        int saves = 0, regressions = 0, notIntervened = 0, latchFlags = 0;
+        for (auto const& test : s_jobResults) {
+            if (test.profile == 0) continue;
+            auto base = std::find_if(s_jobResults.begin(), s_jobResults.end(),
+                [&](JobResult const& r) { return r.group == test.group && r.profile == 0; });
+            if (base == s_jobResults.end()) continue;
+            bool const baseDied = base->status == "died";
+            bool const testDied = test.status == "died";
+            std::string outcome;
+            if (baseDied && !testDied) { outcome = "SAVED"; ++saves; }
+            else if (!baseDied && testDied) { outcome = "REGRESSION"; ++regressions; }
+            else if (baseDied && testDied) {
+                if (test.steps < base->steps) outcome = "DIED_EARLIER";
+                else if (test.steps > base->steps) outcome = "DIED_LATER";
+                else outcome = "DIED_BOTH";
+            } else outcome = "NO_DEATH_BOTH";
+
+            bool const latchLeak = test.pending || test.released ||
+                test.releases > test.arms || test.swallowed > test.releases;
+            std::string const latchState = latchLeak ? "CHECK_LATCH" : "CLEAN";
+            if (latchLeak) ++latchFlags;
+            bool const intervened = test.releases > 0;
+            if (!intervened) { outcome += "_NO_INTERVENTION"; ++notIntervened; }
+            out << fmt::format("{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+                test.group, test.profile, base->name, test.name, base->status,
+                test.status, base->steps, test.steps, test.arms, test.releases,
+                test.swallowed, test.cancelled,
+                decisionName(static_cast<Decision>(test.lastDecision)),
+                intervened ? "YES" : "NO", outcome, latchState);
+        }
+        out.flush();
+        log::info("[MicroCancelQA] comparison: saves={} regressions={} no_intervention={} latch_flags={}",
+                  saves, regressions, notIntervened, latchFlags);
+        Notification::create(
+            fmt::format("Replay comparison: {} saves / {} regressions / {} no-intervention",
+                        saves, regressions, notIntervened),
+            regressions > 0 || latchFlags > 0 ? NotificationIcon::Warning : NotificationIcon::Success,
+            7.f)->show();
+    }
+
     static void finalizeCurrentJob(PlayLayer* pl = nullptr) {
         if (!s_batchActive || !s_jobRunning) return;
         auto q = s_sim.qaSnapshot();
@@ -11196,6 +11255,11 @@ class MicroCancelReplayHarness {
         if (q.expectedPressAt >= 0.0 && q.actualPressAt >= 0.0 && q.tickLength > 0.0)
             errTicks = (q.actualPressAt - q.expectedPressAt) / q.tickLength;
         Job const& job = s_jobs[s_jobIndex];
+        s_jobResults.push_back(JobResult{
+            job.name, job.group, s_finishStatus, job.profile, s_step, s_halfTicks,
+            s_injected, q.lastPlanTicks, q.lastDecision, q.arms, q.releases,
+            q.swallowedKeyUps, q.cancelled, q.pending, q.released
+        });
         if (s_results.is_open()) {
             s_results << fmt::format("{},{},{},{},{},{},{},{:.4f},{:.4f},{},{:.4f},{:.4f},{},{},{},{},{},{},{},{},{},{:.6f},{:.6f},{:.3f}\n",
                 job.name, job.group, job.profile, s_finishStatus, s_step, s_halfTicks,
@@ -11232,6 +11296,7 @@ class MicroCancelReplayHarness {
             ec.clear();
             std::filesystem::rename(s_jobsRunningPath, done, ec);
             if (s_results.is_open()) { s_results.flush(); s_results.close(); }
+            writeComparison();
             Notification::create("Micro-cancel real-game replay batch complete", NotificationIcon::Success, 5.f)->show();
         }
     }
@@ -11290,6 +11355,7 @@ public:
             s_songId = level->m_songID;
             s_audioTrack = level->m_audioTrack;
             s_jobs = std::move(jobs);
+            s_jobResults.clear();
             s_jobIndex = 0;
             s_batchActive = true;
             s_jobsRunningPath = s_dir / "jobs.running.txt";
