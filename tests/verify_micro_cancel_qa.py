@@ -70,7 +70,6 @@ def main():
         ("candidate.killType", "candidate killer type must be captured"),
         ("qaProbe->baseline.killType = r0.killType", "original fatal baseline details must be captured"),
         ("baseline_clearance", "probe CSV must include original baseline clearance"),
-        ("{:.3f}", "probe CSV must avoid type-mismatched precision specifiers"),
         ("microCancelQaProbeReasonName", "probe rejection reasons must be labelled"),
         ("followupVerified(test)", "save classification must verify follow-up"),
         ("SURVIVED_UNVERIFIED_FOLLOWUP", "unverified survival must not count as a save"),
@@ -84,6 +83,9 @@ def main():
     )
     for needle, message in checks:
         require(needle, message)
+    probe_writer = SOURCE.split("static void writeProbeRow(", 1)[1].split("static void writeProbeRows()", 1)[0]
+    if "{:.3f}" in probe_writer:
+        raise AssertionError("probe CSV format must not apply float precision to integer fields")
     groups = parse_sample()
     print(f"Micro-cancel replay QA: {len(groups)} groups / {sum(map(len, groups.values()))} jobs - PASS")
 
