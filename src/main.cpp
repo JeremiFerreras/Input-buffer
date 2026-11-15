@@ -11468,7 +11468,7 @@ class MicroCancelReplayHarness {
                               MicroCancelQaBranchSnapshot const& branch) {
         if (!s_probe.is_open()) return;
         auto const& baseline = q.probe.baseline;
-        s_probe << fmt::format("{},{},{},{},{},{},{},{},{},{:.3f},{},{},{:.3f},{},{},{},{:.3f},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.3f},{},{},{:.3f},{},{},{},{:.3f},{},{}\n",
+        s_probe << fmt::format("{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
             job.name, job.group, q.profile, s_step, q.probe.gateFlags,
             q.probe.gateEligible ? 1 : 0, microCancelQaProbeReasonName(q.probe.reason),
             baseline.end >= 0 ? simEndName(static_cast<SimEnd>(baseline.end)) : "NOT_RUN",

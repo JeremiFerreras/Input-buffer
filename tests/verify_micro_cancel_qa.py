@@ -70,6 +70,7 @@ def main():
         ("candidate.killType", "candidate killer type must be captured"),
         ("qaProbe->baseline.killType = r0.killType", "original fatal baseline details must be captured"),
         ("baseline_clearance", "probe CSV must include original baseline clearance"),
+        ("{:.3f}", "probe CSV must avoid type-mismatched precision specifiers"),
         ("microCancelQaProbeReasonName", "probe rejection reasons must be labelled"),
         ("followupVerified(test)", "save classification must verify follow-up"),
         ("SURVIVED_UNVERIFIED_FOLLOWUP", "unverified survival must not count as a save"),
